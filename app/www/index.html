@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FnDesk</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f4f7fb; color: #17202a; }
+    .shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    .bar { height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px; background: #fff; border-bottom: 1px solid #d7e0ea; }
+    .brand { font-size: 18px; font-weight: 700; color: #075985; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    button { height: 34px; border: 1px solid #b7c4d1; border-radius: 6px; background: #fff; color: #17202a; padding: 0 12px; font: inherit; cursor: pointer; }
+    button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
+    main { width: min(860px, calc(100vw - 32px)); margin: 44px auto; }
+    .panel { background: #fff; border: 1px solid #d7e0ea; border-radius: 8px; padding: 22px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
+    h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.25; }
+    p { margin: 8px 0; color: #465b6b; line-height: 1.65; }
+    code { background: #eef3f8; border: 1px solid #d7e0ea; border-radius: 5px; padding: 2px 6px; color: #0f172a; }
+    pre { overflow: auto; background: #101827; color: #e5edf6; border-radius: 8px; padding: 14px; line-height: 1.55; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+    .item { border: 1px solid #d7e0ea; border-radius: 8px; padding: 14px; }
+    .label { color: #64748b; font-size: 13px; margin-bottom: 4px; }
+    .value { font-weight: 650; word-break: break-word; }
+    @media (max-width: 720px) {
+      .bar { height: auto; min-height: 56px; align-items: flex-start; flex-direction: column; padding: 12px; }
+      .actions { justify-content: flex-start; }
+      main { margin: 22px auto; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="bar">
+      <div class="brand">FnDesk</div>
+      <div class="actions">
+        <button class="primary" id="retry" type="button">重新检测</button>
+        <button id="restart" type="button">重启本地 Edge</button>
+        <button id="start" type="button">启动本地 Edge</button>
+        <button id="stop" type="button">停止本地 Edge</button>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <h1>Web Edge 还没有启动</h1>
+        <p>FnDesk Web 端需要一个独立的虚拟显示器来运行真正的 Microsoft Edge。这里不会安装 GNOME、KDE 或其他本地桌面环境，最小依赖是 <code>tigervnc-standalone-server</code>、<code>tigervnc-common</code>、<code>novnc</code>、<code>websockify</code>。</p>
+        <p>当前缺少的组件：</p>
+        <pre id="missing">检测中...</pre>
+        <p>安装这些组件后，重启 FnDesk 应用服务，应用中心再次打开就是 noVNC 中的真实 Edge。</p>
+        <div class="grid">
+          <div class="item">
+            <div class="label">本地显示器 Edge</div>
+            <div class="value" id="local">检测中...</div>
+          </div>
+          <div class="item">
+            <div class="label">显示器电源策略</div>
+            <div class="value" id="power">检测中...</div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const missing = document.getElementById('missing');
+    const local = document.getElementById('local');
+    const power = document.getElementById('power');
+
+    async function refresh() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        const data = await res.json();
+        const deps = data.missingDeps || [];
+        missing.textContent = deps.length ? deps.join('\n') : '依赖已齐全，请重启 FnDesk 应用服务。';
+        if (deps.includes('web-edge-start-failed')) {
+          missing.textContent = 'Web Edge 启动失败。请查看 /usr/local/apps/@appdata/fndesk/fndesk.log。';
+        }
+        local.textContent = data.webKiosk || 'unknown';
+        power.textContent = data.displayPower || 'unknown';
+      } catch (err) {
+        missing.textContent = String(err);
+      }
+    }
+
+    for (const [id, path] of [['restart', '/api/service/restart'], ['start', '/api/service/start'], ['stop', '/api/service/stop']]) {
+      document.getElementById(id).addEventListener('click', async () => {
+        await fetch(path, { method: 'POST' });
+        await refresh();
+      });
+    }
+
+    document.getElementById('retry').addEventListener('click', refresh);
+    refresh();
+  </script>
+</body>
+</html>

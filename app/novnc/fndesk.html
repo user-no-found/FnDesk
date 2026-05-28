@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FnDesk</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #111827; }
+    #screen { position: fixed; inset: 0; width: 100vw; height: 100vh; overflow: hidden; background: #111827; }
+    #screen > div { width: 100% !important; height: 100% !important; overflow: hidden !important; }
+    #screen canvas { display: block; }
+    #status { position: fixed; left: 12px; top: 10px; z-index: 2; padding: 5px 8px; border-radius: 6px; background: rgba(15, 23, 42, 0.72); color: #fff; font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    #clipboard-panel { position: fixed; right: 12px; top: 10px; z-index: 4; display: none; align-items: center; gap: 8px; max-width: min(440px, calc(100vw - 24px)); padding: 7px 8px; border-radius: 6px; background: rgba(15, 23, 42, 0.86); color: #fff; font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22); }
+    #clipboard-panel span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #clipboard-panel button { height: 26px; border: 0; border-radius: 4px; padding: 0 9px; color: #111827; background: #f9fafb; font: inherit; cursor: pointer; }
+    #clipboard-panel button.icon { width: 26px; padding: 0; color: #fff; background: transparent; font-size: 18px; line-height: 24px; }
+    #https-banner { position: fixed; right: 12px; bottom: 12px; z-index: 4; display: none; align-items: center; gap: 8px; max-width: min(440px, calc(100vw - 24px)); padding: 7px 8px; border-radius: 6px; background: rgba(15, 23, 42, 0.86); color: #fff; font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22); }
+    #https-banner span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #https-banner button { height: 26px; border: 0; border-radius: 4px; padding: 0 9px; color: #111827; background: #f9fafb; font: inherit; cursor: pointer; }
+    #https-banner button.icon { width: 26px; padding: 0; color: #fff; background: transparent; font-size: 18px; line-height: 24px; }
+    #ime-proxy { position: fixed; left: 12px; top: 12px; z-index: 3; width: 2px; height: 1.2em; padding: 0; border: 0; outline: 0; resize: none; opacity: 0; color: transparent; background: transparent; caret-color: transparent; pointer-events: none; overflow: hidden; }
+  </style>
+  <script>
+    window.addEventListener('error', event => {
+      const status = document.getElementById('status');
+      if (status) status.textContent = event.message || 'Load error';
+    });
+    window.addEventListener('unhandledrejection', event => {
+      const status = document.getElementById('status');
+      if (status) status.textContent = String(event.reason || 'Load error');
+    });
+  </script>
+  <script type="module">
+    import RFB from '/core/rfb.js';
+    import keysyms from '/core/input/keysymdef.js';
+
+    const status = document.getElementById('status');
+    const screen = document.getElementById('screen');
+    const imeProxy = document.getElementById('ime-proxy');
+    const clipboardPanel = document.getElementById('clipboard-panel');
+    const clipboardSummary = document.getElementById('clipboard-summary');
+    const copyLocalButton = document.getElementById('copy-local');
+    const closeClipboardButton = document.getElementById('close-clipboard');
+
+    function query(name, fallback = '') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get(name) || fallback;
+    }
+
+    function setStatus(text) {
+      clearTimeout(statusTimer);
+      status.textContent = text;
+      status.style.display = text ? 'block' : 'none';
+    }
+
+    function flashStatus(text) {
+      setStatus(text);
+      statusTimer = window.setTimeout(() => setStatus(''), 1200);
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = query('host', window.location.hostname);
+    const port = query('port', window.location.port);
+    const path = query('path', 'websockify');
+    const password = query('password', '');
+    const url = `${protocol}://${host}${port ? `:${port}` : ''}/${path}`;
+    let resizeTimer = 0;
+    let composing = false;
+    let lastImeText = '';
+    let lastImeAt = 0;
+    let statusTimer = 0;
+    let pasteShortcutTimer = 0;
+    let remoteClipboardText = '';
+    const suppressedKeyUps = new Set();
+    const activeModifiers = new Map();
+    const remoteModifiers = new Map();
+    const modifierKeysyms = {
+      ShiftLeft: 0xffe1,
+      ShiftRight: 0xffe2,
+      ControlLeft: 0xffe3,
+      ControlRight: 0xffe4,
+      AltLeft: 0xffe9,
+      AltRight: 0xffea,
+      MetaLeft: 0xffeb,
+      MetaRight: 0xffec,
+    };
+    const specialKeysyms = {
+      Backspace: 0xff08,
+      Tab: 0xff09,
+      Enter: 0xff0d,
+      Escape: 0xff1b,
+      Insert: 0xff63,
+      Delete: 0xffff,
+      Home: 0xff50,
+      End: 0xff57,
+      PageUp: 0xff55,
+      PageDown: 0xff56,
+      ArrowLeft: 0xff51,
+      ArrowUp: 0xff52,
+      ArrowRight: 0xff53,
+      ArrowDown: 0xff54,
+      F1: 0xffbe,
+      F2: 0xffbf,
+      F3: 0xffc0,
+      F4: 0xffc1,
+      F5: 0xffc2,
+      F6: 0xffc3,
+      F7: 0xffc4,
+      F8: 0xffc5,
+      F9: 0xffc6,
+      F10: 0xffc7,
+      F11: 0xffc8,
+      F12: 0xffc9,
+    };
+
+    setStatus('Connecting');
+    const rfb = new RFB(screen, url, { credentials: { password } });
+
+    rfb.viewOnly = false;
+    rfb.clipViewport = false;
+    rfb.scaleViewport = false;
+    rfb.resizeSession = true;
+    rfb.qualityLevel = 6;
+    rfb.compressionLevel = 2;
+
+    rfb._screenSize = () => ({
+      w: Math.max(1, Math.floor(window.innerWidth || document.documentElement.clientWidth || screen.clientWidth || 1600)),
+      h: Math.max(1, Math.floor(window.innerHeight || document.documentElement.clientHeight || screen.clientHeight || 900)),
+    });
+
+    rfb.addEventListener('connect', () => {
+      setStatus('');
+      syncRemoteSize(true);
+      focusImeProxy();
+    });
+    rfb.addEventListener('disconnect', event => {
+      setStatus(event.detail.clean ? 'Disconnected' : 'Connection closed');
+    });
+    rfb.addEventListener('credentialsrequired', () => {
+      const value = window.prompt('Password Required:');
+      rfb.sendCredentials({ password: value || '' });
+    });
+    rfb.addEventListener('clipboard', event => {
+      handleRemoteClipboard(event.detail.text || '');
+    });
+
+    function syncRemoteSize(immediate = false) {
+      rfb.scaleViewport = false;
+      rfb.resizeSession = true;
+      screen.style.width = `${Math.max(1, window.innerWidth)}px`;
+      screen.style.height = `${Math.max(1, window.innerHeight)}px`;
+
+      clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        if (typeof rfb._requestRemoteResize === 'function') {
+          rfb._requestRemoteResize();
+        }
+      }, immediate ? 50 : 250);
+    }
+
+    window.addEventListener('resize', syncRemoteSize);
+    window.visualViewport?.addEventListener('resize', syncRemoteSize);
+    window.addEventListener('pageshow', () => syncRemoteSize(true));
+
+    new ResizeObserver(() => syncRemoteSize()).observe(screen);
+
+    function focusImeProxy() {
+      if (!imeProxy || document.activeElement === imeProxy) return;
+      imeProxy.focus({ preventScroll: true });
+    }
+
+    function moveImeProxy(event) {
+      const x = Math.max(0, Math.min(window.innerWidth - 4, event.clientX || 12));
+      const y = Math.max(0, Math.min(window.innerHeight - 24, event.clientY || 12));
+      imeProxy.style.left = `${x}px`;
+      imeProxy.style.top = `${y}px`;
+    }
+
+    function sendTextAsKeys(text) {
+      releaseRemoteModifiers();
+      for (const char of Array.from(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))) {
+        if (char === '\n') {
+          rfb.sendKey(0xff0d, 'Enter');
+          continue;
+        }
+        rfb.sendKey(keysyms.lookup(char.codePointAt(0)), 'Unidentified');
+      }
+    }
+
+    function commitImeText(text) {
+      if (!text) return;
+      lastImeText = text;
+      lastImeAt = Date.now();
+      flashStatus(/[^\x00-\x7f]/.test(text) ? 'IME key input' : 'Key input');
+      sendTextAsKeys(text);
+      imeProxy.value = '';
+    }
+
+    function commitPastedText(text) {
+      clearTimeout(pasteShortcutTimer);
+      commitImeText(text);
+    }
+
+    async function readClientClipboardForPaste() {
+      if (navigator.clipboard?.read) {
+        try {
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            const imageType = item.types.find(t => t.startsWith('image/'));
+            if (imageType) {
+              const blob = await item.getType(imageType);
+              if (await uploadImageAndPaste(blob)) return true;
+            }
+          }
+        } catch {
+          // Fall through to text read.
+        }
+      }
+      if (!navigator.clipboard?.readText) return false;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text) return false;
+        commitPastedText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    async function uploadImageAndPaste(blob) {
+      if (!blob || !blob.type) return false;
+      try {
+        const res = await fetch('/clipboard/image', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type },
+          body: blob,
+        });
+        if (!res.ok) {
+          flashStatus('Image paste failed');
+          return false;
+        }
+      } catch {
+        flashStatus('Image paste failed');
+        return false;
+      }
+      clearTimeout(pasteShortcutTimer);
+      sendRemotePasteShortcut();
+      flashStatus('Image pasted');
+      return true;
+    }
+
+    function sendRemotePasteShortcut() {
+      releaseRemoteModifiers();
+      rfb.sendKey(0xffe3, 'ControlLeft', true);
+      remoteModifiers.set('ControlLeft', 0xffe3);
+      rfb.sendKey(0x0076, 'KeyV', true);
+      rfb.sendKey(0x0076, 'KeyV', false);
+      rfb.sendKey(0xffe3, 'ControlLeft', false);
+      remoteModifiers.delete('ControlLeft');
+    }
+
+    function shouldCommitViaInput(event) {
+      if (event.ctrlKey || event.metaKey || event.altKey) return false;
+      return event.key && event.key.length === 1;
+    }
+
+    function isPasteShortcut(event) {
+      return (event.ctrlKey || event.metaKey) && !event.altKey && event.key?.toLowerCase() === 'v';
+    }
+
+    function trackModifier(event, down) {
+      const keysym = modifierKeysyms[event.code];
+      if (!keysym) return false;
+      if (down) {
+        activeModifiers.set(event.code, keysym);
+      } else {
+        activeModifiers.delete(event.code);
+      }
+      return true;
+    }
+
+    function releaseRemoteModifiers() {
+      for (const [code, keysym] of remoteModifiers) {
+        rfb.sendKey(keysym, code, false);
+      }
+      remoteModifiers.clear();
+    }
+
+    function syncActiveModifiersToRemote() {
+      for (const [code, keysym] of activeModifiers) {
+        if (remoteModifiers.has(code)) continue;
+        rfb.sendKey(keysym, code, true);
+        remoteModifiers.set(code, keysym);
+      }
+    }
+
+    function fallbackRemotePaste() {
+      clearTimeout(pasteShortcutTimer);
+      syncActiveModifiersToRemote();
+      rfb.sendKey(0x0076, 'KeyV', true);
+      rfb.sendKey(0x0076, 'KeyV', false);
+    }
+
+    function keysymForEvent(event) {
+      if (Object.prototype.hasOwnProperty.call(specialKeysyms, event.key)) {
+        return specialKeysyms[event.key];
+      }
+      if (event.key && event.key.length === 1) {
+        return keysyms.lookup(event.key.codePointAt(0));
+      }
+      return 0;
+    }
+
+    function sendEventKey(event, down) {
+      const keysym = keysymForEvent(event);
+      if (!keysym) return false;
+      rfb.sendKey(keysym, event.code || 'Unidentified', down);
+      return true;
+    }
+
+    function sendShortcutKey(event) {
+      syncActiveModifiersToRemote();
+      if (!sendEventKey(event, true)) return false;
+      sendEventKey(event, false);
+      return true;
+    }
+
+    async function writeClientClipboard(text) {
+      if (!text) return false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(text);
+          flashStatus('Copied to local clipboard');
+          return true;
+        } catch {
+          // Fall through to execCommand, which still works in some HTTP contexts.
+        }
+      }
+      const copyBox = document.createElement('textarea');
+      copyBox.value = text;
+      copyBox.setAttribute('readonly', '');
+      copyBox.style.position = 'fixed';
+      copyBox.style.left = '-10000px';
+      copyBox.style.top = '0';
+      document.body.appendChild(copyBox);
+      copyBox.focus();
+      copyBox.select();
+      let copied = false;
+      try {
+        copied = document.execCommand('copy');
+      } catch {
+        copied = false;
+      }
+      copyBox.remove();
+      focusImeProxy();
+      if (copied) {
+        flashStatus('Copied to local clipboard');
+      }
+      return copied;
+    }
+
+    function showClipboardPanel(text) {
+      if (!text) return;
+      clipboardSummary.textContent = text.replace(/\s+/g, ' ').slice(0, 80) || 'Remote clipboard';
+      clipboardPanel.style.display = 'flex';
+    }
+
+    async function handleRemoteClipboard(text) {
+      if (!text) return;
+      remoteClipboardText = text;
+      const copied = await writeClientClipboard(text);
+      if (!copied) {
+        showClipboardPanel(text);
+      }
+    }
+
+    function handleKeyDown(event) {
+      if (composing || event.isComposing || event.keyCode === 229) {
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (trackModifier(event, true)) {
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (isPasteShortcut(event)) {
+        suppressedKeyUps.add(event.code || event.key);
+        clearTimeout(pasteShortcutTimer);
+        pasteShortcutTimer = window.setTimeout(() => {
+          readClientClipboardForPaste().then(pasted => {
+            if (!pasted) fallbackRemotePaste();
+          });
+        }, 250);
+        return;
+      }
+      if (activeModifiers.size > 0) {
+        if (sendShortcutKey(event)) {
+          suppressedKeyUps.add(event.code || event.key);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(specialKeysyms, event.key)) {
+        if (sendEventKey(event, true)) {
+          suppressedKeyUps.add(event.code || event.key);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+        return;
+      }
+      if (shouldCommitViaInput(event)) {
+        suppressedKeyUps.add(event.code || event.key);
+      }
+    }
+
+    function handleKeyUp(event) {
+      if (composing || event.isComposing || event.keyCode === 229) {
+        event.stopImmediatePropagation();
+        return;
+      }
+      const keyId = event.code || event.key;
+      if (trackModifier(event, false)) {
+        const keysym = remoteModifiers.get(keyId);
+        if (keysym) {
+          rfb.sendKey(keysym, keyId, false);
+          remoteModifiers.delete(keyId);
+        }
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (suppressedKeyUps.has(keyId)) {
+        suppressedKeyUps.delete(keyId);
+        if (Object.prototype.hasOwnProperty.call(specialKeysyms, event.key)) {
+          sendEventKey(event, false);
+        }
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
+
+    imeProxy.addEventListener('compositionstart', () => {
+      composing = true;
+    });
+    imeProxy.addEventListener('compositionend', event => {
+      composing = false;
+      commitImeText(event.data || imeProxy.value);
+    });
+    imeProxy.addEventListener('input', event => {
+      const text = event.data || imeProxy.value;
+      if (!text || event.isComposing || composing) return;
+      imeProxy.value = '';
+      if (text === lastImeText && Date.now() - lastImeAt < 100) return;
+      commitImeText(text);
+    });
+    function extractClipboardImage(clipboardData) {
+      if (!clipboardData) return null;
+      const items = clipboardData.items || [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+          const blob = item.getAsFile();
+          if (blob) return blob;
+        }
+      }
+      return null;
+    }
+
+    function handlePasteEvent(event) {
+      const image = extractClipboardImage(event.clipboardData);
+      if (image) {
+        clearTimeout(pasteShortcutTimer);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        uploadImageAndPaste(image);
+        return true;
+      }
+      const text = event.clipboardData?.getData('text/plain') || '';
+      if (!text) return false;
+      clearTimeout(pasteShortcutTimer);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      commitPastedText(text);
+      return true;
+    }
+
+    imeProxy.addEventListener('paste', handlePasteEvent);
+    window.addEventListener('paste', event => {
+      if (handlePasteEvent(event)) focusImeProxy();
+    }, true);
+    window.addEventListener('beforeinput', event => {
+      if (event.inputType !== 'insertFromPaste') return;
+      const text = event.data || '';
+      if (!text) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      commitPastedText(text);
+    }, true);
+    copyLocalButton.addEventListener('click', async () => {
+      if (await writeClientClipboard(remoteClipboardText)) {
+        clipboardPanel.style.display = 'none';
+      }
+    });
+    closeClipboardButton.addEventListener('click', () => {
+      clipboardPanel.style.display = 'none';
+      focusImeProxy();
+    });
+
+    screen.addEventListener('pointerdown', event => {
+      moveImeProxy(event);
+      window.setTimeout(focusImeProxy, 0);
+    }, true);
+    window.addEventListener('focus', focusImeProxy);
+
+    if (window.location.protocol === 'http:' && window.isSecureContext === false) {
+      const banner = document.getElementById('https-banner');
+      const openHttps = document.getElementById('open-https');
+      const closeHttps = document.getElementById('close-https');
+      banner.style.display = 'flex';
+      openHttps.addEventListener('click', () => {
+        const target = new URL(window.location.href);
+        target.protocol = 'https:';
+        window.location.href = target.toString();
+      });
+      closeHttps.addEventListener('click', () => {
+        banner.style.display = 'none';
+        focusImeProxy();
+      });
+    }
+  </script>
+</head>
+<body>
+  <div id="status">Loading</div>
+  <div id="clipboard-panel">
+    <span id="clipboard-summary"></span>
+    <button id="copy-local" type="button">复制到本机</button>
+    <button id="close-clipboard" class="icon" type="button" aria-label="关闭">×</button>
+  </div>
+  <div id="https-banner">
+    <span>HTTP 下无法同步剪贴板，点击切换到 HTTPS</span>
+    <button id="open-https" type="button">启用</button>
+    <button id="close-https" class="icon" type="button" aria-label="关闭">×</button>
+  </div>
+  <div id="screen"></div>
+  <textarea id="ime-proxy" aria-hidden="true" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+</body>
+</html>

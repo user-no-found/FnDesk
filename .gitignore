@@ -1,0 +1,7 @@
+app.tgz
+fndesk.fpk
+app/debs/*.deb
+*.log
+*.tmp
+__pycache__/
+*.pyc
