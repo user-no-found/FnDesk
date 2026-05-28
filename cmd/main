@@ -1,0 +1,306 @@
+#!/bin/bash
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PKG_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+APP_DEST="${TRIM_APPDEST:-${PKG_ROOT}}"
+PKG_VAR="${TRIM_PKGVAR:-${PKG_ROOT}/var}"
+LOG_FILE="${PKG_VAR}/fndesk.log"
+PORT="${TRIM_SERVICE_PORT:-18733}"
+DISPLAY_ID="${FNDESK_WEB_DISPLAY:-:99}"
+VNC_PORT="${FNDESK_VNC_PORT:-5901}"
+SCREEN_GEOMETRY="${FNDESK_WEB_GEOMETRY:-1920x1080}"
+NOVNC_WEB_ROOT="${PKG_VAR}/novnc-web"
+FALLBACK_PID_FILE="${PKG_VAR}/fndesk-fallback.pid"
+XVNC_PID_FILE="${PKG_VAR}/fndesk-xvnc.pid"
+VNCCONFIG_PID_FILE="${PKG_VAR}/fndesk-vncconfig.pid"
+EDGE_PID_FILE="${PKG_VAR}/fndesk-edge.pid"
+WINDOW_SYNC_PID_FILE="${PKG_VAR}/fndesk-window-sync.pid"
+WEBSOCKIFY_PID_FILE="${PKG_VAR}/fndesk-websockify.pid"
+RUNUSER_BIN="${FNDESK_RUNUSER:-/usr/sbin/runuser}"
+
+if [ -f /etc/default/web-kiosk ]; then
+    # shellcheck disable=SC1091
+    . /etc/default/web-kiosk
+fi
+TLS_CERT="${FNDESK_TLS_CERT:-/etc/web-kiosk/fndesk-cert.pem}"
+TLS_KEY="${FNDESK_TLS_KEY:-/etc/web-kiosk/fndesk-key.pem}"
+
+if [ ! -x "${RUNUSER_BIN}" ]; then
+    RUNUSER_BIN="$(command -v runuser 2>/dev/null || true)"
+fi
+
+display_number() {
+    printf '%s' "${DISPLAY_ID#:}"
+}
+
+log_msg() {
+    mkdir -p "$(dirname "${LOG_FILE}")"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+check_process() {
+    local pid="$1"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+pid_alive() {
+    local file="$1"
+    local pid=""
+    if [ -f "${file}" ]; then
+        pid=$(head -n 1 "${file}" | tr -d '[:space:]')
+        check_process "${pid}"
+        return $?
+    fi
+    return 1
+}
+
+stop_pid_file() {
+    local file="$1"
+    local pid=""
+    if [ -f "${file}" ]; then
+        pid=$(head -n 1 "${file}" | tr -d '[:space:]')
+        if check_process "${pid}"; then
+            kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1 || true
+            sleep 1
+            kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1 || true
+        fi
+        rm -f "${file}"
+    fi
+}
+
+missing_deps() {
+    local missing=()
+    local cmd
+    for cmd in Xvnc websockify microsoft-edge-stable xdpyinfo xdotool vncconfig xclip python3; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            missing+=("${cmd}")
+        fi
+    done
+    if [ -z "${RUNUSER_BIN}" ]; then
+        missing+=("runuser")
+    fi
+    if [ ! -f /usr/share/novnc/vnc_lite.html ]; then
+        missing+=("novnc")
+    fi
+    printf '%s\n' "${missing[@]}"
+}
+
+prepare_novnc_web() {
+    rm -rf "${NOVNC_WEB_ROOT}"
+    mkdir -p "${NOVNC_WEB_ROOT}" "${NOVNC_WEB_ROOT}/app/fndesk"
+    cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/fndesk.html"
+    cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/app/fndesk/index.html"
+    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/core"
+    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/app/fndesk/core"
+}
+
+resolve_kiosk_user() {
+    if [ -f /etc/default/web-kiosk ]; then
+        # shellcheck disable=SC1091
+        . /etc/default/web-kiosk
+    fi
+    if [ -n "${KIOSK_USER:-}" ] && id "${KIOSK_USER}" >/dev/null 2>&1; then
+        printf '%s' "${KIOSK_USER}"
+        return 0
+    fi
+    getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $6 ~ /^\// && $7 !~ /(nologin|false)$/ { print $1; exit }'
+}
+
+status_process() {
+    if pid_alive "${WEBSOCKIFY_PID_FILE}" || pid_alive "${FALLBACK_PID_FILE}"; then
+        return 0
+    fi
+    return 3
+}
+
+stop_process() {
+    mkdir -p "${PKG_VAR}"
+    log_msg "Stopping FnDesk Web Edge session."
+    stop_pid_file "${WEBSOCKIFY_PID_FILE}"
+    stop_pid_file "${WINDOW_SYNC_PID_FILE}"
+    stop_pid_file "${EDGE_PID_FILE}"
+    stop_pid_file "${VNCCONFIG_PID_FILE}"
+    stop_pid_file "${XVNC_PID_FILE}"
+    stop_pid_file "${FALLBACK_PID_FILE}"
+    pkill -TERM -f "Xvnc ${DISPLAY_ID} .*fndesk" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "fndesk-window-sync-$(display_number)" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "vncconfig -nowin" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "microsoft-edge-stable .*fndesk.*/web-edge-profile" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "websockify .*${PORT}.*${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "fndesk-ws.py.*${PORT}.*${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "xclip -selection clipboard" >> "${LOG_FILE}" 2>&1 || true
+    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
+    sleep 1
+}
+
+start_fallback() {
+    local missing="$1"
+    mkdir -p "${PKG_VAR}"
+    log_msg "Starting fallback page. Missing dependencies: ${missing}"
+    FNDESK_MISSING_DEPS="${missing}" TRIM_APPDEST="${APP_DEST}" TRIM_PKGVAR="${PKG_VAR}" TRIM_SERVICE_PORT="${PORT}" \
+        nohup python3 "${APP_DEST}/server/fndesk-server.py" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${FALLBACK_PID_FILE}"
+    sleep 1
+    pid_alive "${FALLBACK_PID_FILE}"
+}
+
+start_window_sync() {
+    local kiosk_user="$1"
+    local user_home="$2"
+    local runtime_dir="$3"
+
+    if [ ! -x "${APP_DEST}/window-sync.sh" ]; then
+        log_msg "Window sync script is missing: ${APP_DEST}/window-sync.sh"
+        return 1
+    fi
+
+    log_msg "Starting Edge window sync for Web display."
+    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
+        DISPLAY="${DISPLAY_ID}" \
+        XDG_RUNTIME_DIR="${runtime_dir}" \
+        HOME="${user_home}" \
+        LANG=zh_CN.UTF-8 \
+        FNDESK_WINDOW_SYNC_NAME="fndesk-window-sync-$(display_number)" \
+        "${APP_DEST}/window-sync.sh" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${WINDOW_SYNC_PID_FILE}"
+    sleep 1
+    pid_alive "${WINDOW_SYNC_PID_FILE}"
+}
+
+start_web_edge() {
+    local kiosk_user="$1"
+    local user_home
+    local user_group
+    local runtime_dir
+    local profile_dir
+
+    user_home="$(getent passwd "${kiosk_user}" | cut -d: -f6)"
+    user_group="$(id -gn "${kiosk_user}")"
+    runtime_dir="/tmp/fndesk-web-runtime-${kiosk_user}"
+    profile_dir="${user_home}/.local/share/fndesk/web-edge-profile"
+
+    mkdir -p "${PKG_VAR}" "${runtime_dir}" "${profile_dir}"
+    chown "${kiosk_user}:${user_group}" "${runtime_dir}" "${profile_dir}" 2>/dev/null || true
+    chmod 700 "${runtime_dir}" 2>/dev/null || true
+    chmod 700 "${profile_dir}" 2>/dev/null || true
+
+    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
+
+    log_msg "Starting Xvnc on ${DISPLAY_ID}."
+    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
+        XDG_RUNTIME_DIR="${runtime_dir}" \
+        HOME="${user_home}" \
+        LANG=zh_CN.UTF-8 \
+        LANGUAGE=zh_CN:zh \
+        LC_ALL=zh_CN.UTF-8 \
+        Xvnc "${DISPLAY_ID}" \
+            -geometry "${SCREEN_GEOMETRY}" \
+            -depth 24 \
+            -localhost \
+            -SecurityTypes None \
+            -rfbport "${VNC_PORT}" \
+            -AlwaysShared \
+            -AcceptSetDesktopSize=1 \
+            -ac >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${XVNC_PID_FILE}"
+    sleep 1
+    if ! pid_alive "${XVNC_PID_FILE}"; then
+        log_msg "Xvnc failed to stay running."
+        return 1
+    fi
+
+    log_msg "Starting vncconfig for Web clipboard sync."
+    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
+        DISPLAY="${DISPLAY_ID}" \
+        XDG_RUNTIME_DIR="${runtime_dir}" \
+        HOME="${user_home}" \
+        LANG=zh_CN.UTF-8 \
+        vncconfig -nowin >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${VNCCONFIG_PID_FILE}"
+    sleep 1
+
+    log_msg "Starting Edge for Web display as ${kiosk_user}; profile=${profile_dir}."
+    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
+        DISPLAY="${DISPLAY_ID}" \
+        XDG_RUNTIME_DIR="${runtime_dir}" \
+        HOME="${user_home}" \
+        LANG=zh_CN.UTF-8 \
+        LANGUAGE=zh_CN:zh \
+        LC_ALL=zh_CN.UTF-8 \
+        dbus-run-session -- microsoft-edge-stable \
+            --user-data-dir="${profile_dir}" \
+            --start-maximized \
+            --ozone-platform=x11 \
+            --lang=zh-CN \
+            --no-first-run \
+            --no-default-browser-check \
+            --password-store=basic \
+            --disable-session-crashed-bubble \
+            --disable-infobars >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${EDGE_PID_FILE}"
+    sleep 2
+    if ! pid_alive "${EDGE_PID_FILE}"; then
+        log_msg "Edge failed to stay running."
+        return 1
+    fi
+    if ! start_window_sync "${kiosk_user}" "${user_home}" "${runtime_dir}"; then
+        log_msg "Edge window sync failed to stay running."
+        return 1
+    fi
+
+    log_msg "Starting noVNC/websockify on 0.0.0.0:${PORT}."
+    prepare_novnc_web
+    local ws_tls_args=()
+    if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
+        ws_tls_args=(--cert "${TLS_CERT}" --key "${TLS_KEY}")
+        log_msg "Websockify TLS enabled (cert=${TLS_CERT})."
+    else
+        log_msg "Websockify TLS disabled; cert/key missing."
+    fi
+    FNDESK_WEB_DISPLAY="${DISPLAY_ID}" \
+        python3 "${APP_DEST}/server/fndesk-ws.py" "${ws_tls_args[@]}" --web "${NOVNC_WEB_ROOT}" "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${WEBSOCKIFY_PID_FILE}"
+    sleep 1
+
+    pid_alive "${WEBSOCKIFY_PID_FILE}"
+}
+
+start_process() {
+    if status_process; then
+        log_msg "FnDesk Web service is already running."
+        return 0
+    fi
+
+    stop_process
+
+    local missing
+    missing="$(missing_deps | paste -sd ' ' -)"
+    if [ -n "${missing}" ]; then
+        start_fallback "${missing}"
+        return $?
+    fi
+
+    local kiosk_user
+    kiosk_user="$(resolve_kiosk_user)"
+    if [ -z "${kiosk_user}" ]; then
+        start_fallback "regular-login-user"
+        return $?
+    fi
+
+    if start_web_edge "${kiosk_user}"; then
+        return 0
+    fi
+
+    log_msg "Web Edge failed to start; showing fallback page instead."
+    stop_process
+    start_fallback "web-edge-start-failed"
+}
+
+case "${1:-}" in
+start) start_process ;;
+stop) stop_process ;;
+status) status_process ;;
+restart) stop_process; start_process ;;
+*) exit 1 ;;
+esac
