@@ -31,9 +31,10 @@
     });
   </script>
   <script type="module">
-    import RFB from '/core/rfb.js';
-    import keysyms from '/core/input/keysymdef.js';
+    import RFB from '/app/fndesk/core/rfb.js';
+    import keysyms from '/app/fndesk/core/input/keysymdef.js';
 
+    function boot() {
     const status = document.getElementById('status');
     const screen = document.getElementById('screen');
     const imeProxy = document.getElementById('ime-proxy');
@@ -159,7 +160,9 @@
     }
 
     window.addEventListener('resize', syncRemoteSize);
-    window.visualViewport?.addEventListener('resize', syncRemoteSize);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncRemoteSize);
+    }
     window.addEventListener('pageshow', () => syncRemoteSize(true));
 
     new ResizeObserver(() => syncRemoteSize()).observe(screen);
@@ -202,7 +205,7 @@
     }
 
     async function readClientClipboardForPaste() {
-      if (navigator.clipboard?.read) {
+      if (navigator.clipboard && navigator.clipboard.read) {
         try {
           const items = await navigator.clipboard.read();
           for (const item of items) {
@@ -216,7 +219,7 @@
           // Fall through to text read.
         }
       }
-      if (!navigator.clipboard?.readText) return false;
+      if (!navigator.clipboard || !navigator.clipboard.readText) return false;
       try {
         const text = await navigator.clipboard.readText();
         if (!text) return false;
@@ -265,7 +268,7 @@
     }
 
     function isPasteShortcut(event) {
-      return (event.ctrlKey || event.metaKey) && !event.altKey && event.key?.toLowerCase() === 'v';
+      return (event.ctrlKey || event.metaKey) && !event.altKey && event.key && event.key.toLowerCase() === 'v';
     }
 
     function trackModifier(event, down) {
@@ -327,7 +330,7 @@
 
     async function writeClientClipboard(text) {
       if (!text) return false;
-      if (navigator.clipboard?.writeText) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
         try {
           await navigator.clipboard.writeText(text);
           flashStatus('Copied to local clipboard');
@@ -477,7 +480,7 @@
         uploadImageAndPaste(image);
         return true;
       }
-      const text = event.clipboardData?.getData('text/plain') || '';
+      const text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
       if (!text) return false;
       clearTimeout(pasteShortcutTimer);
       event.preventDefault();
@@ -528,6 +531,13 @@
         banner.style.display = 'none';
         focusImeProxy();
       });
+    }
+    }
+
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', boot, { once: true });
+    } else {
+      boot();
     }
   </script>
 </head>

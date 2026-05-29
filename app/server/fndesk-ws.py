@@ -15,6 +15,24 @@ DISPLAY = os.environ.get('FNDESK_WEB_DISPLAY', ':99')
 
 
 class FnDeskRequestHandler(websocketproxy.ProxyRequestHandler):
+    def log_message(self, fmt, *args):
+        sys.stderr.write(
+            '%s - - [%s] %s path=%s\n' % (
+                self.address_string(),
+                self.log_date_time_string(),
+                fmt % args,
+                self.path,
+            )
+        )
+
+    def do_GET(self):
+        if self.path == '/app/fndesk':
+            self.send_response(302)
+            self.send_header('Location', '/app/fndesk/')
+            self.end_headers()
+            return
+        return super().do_GET()
+
     def do_POST(self):
         if self.path != '/clipboard/image':
             self.send_error(404, 'Not found')
