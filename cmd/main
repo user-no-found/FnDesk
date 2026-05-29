@@ -88,11 +88,15 @@ missing_deps() {
 
 prepare_novnc_web() {
     rm -rf "${NOVNC_WEB_ROOT}"
-    mkdir -p "${NOVNC_WEB_ROOT}" "${NOVNC_WEB_ROOT}/app/fndesk"
+    mkdir -p "${NOVNC_WEB_ROOT}" "${NOVNC_WEB_ROOT}/app/fndesk" "${NOVNC_WEB_ROOT}/app"
     cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/fndesk.html"
     cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/app/fndesk/index.html"
     ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/core"
+    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/vendor"
+    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/app/core"
+    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/app/vendor"
     ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/app/fndesk/core"
+    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/app/fndesk/vendor"
 }
 
 resolve_kiosk_user() {
@@ -108,7 +112,10 @@ resolve_kiosk_user() {
 }
 
 status_process() {
-    if pid_alive "${WEBSOCKIFY_PID_FILE}" || pid_alive "${FALLBACK_PID_FILE}"; then
+    if pid_alive "${FALLBACK_PID_FILE}"; then
+        return 0
+    fi
+    if pid_alive "${WEBSOCKIFY_PID_FILE}" && pid_alive "${XVNC_PID_FILE}" && pid_alive "${EDGE_PID_FILE}"; then
         return 0
     fi
     return 3
@@ -232,6 +239,9 @@ start_web_edge() {
             --user-data-dir="${profile_dir}" \
             --start-maximized \
             --ozone-platform=x11 \
+            --disable-gpu \
+            --disable-gpu-compositing \
+            --disable-dev-shm-usage \
             --lang=zh-CN \
             --no-first-run \
             --no-default-browser-check \

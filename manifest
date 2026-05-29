@@ -1,5 +1,5 @@
 appname      = fndesk
-version               = 0.0.1
+version               = 0.0.2
 display_name          = FnDesk
 desc                  = 本地显示器与Web中独立运行Microsoft Edge，卡死可在命令行执行“ fndesk-restart ”恢复本地显示。<br>为什么加个多此一举的web访问？因为想方便公网访问内网设备！<br>仓库地址：https://github.com/user-no-found/FnDesk
 platform              = x86

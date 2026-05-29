@@ -345,8 +345,8 @@ has_connected_display() {
 }
 
 if ! has_connected_display; then
-  echo "FnDesk local display: no connected DRM display; keeping service idle until hotplug." >&2
-  exec sleep infinity
+  echo "FnDesk local display: no connected DRM display; local display service is idle." >&2
+  exit 75
 fi
 
 exec dbus-run-session -- cage -s -- /usr/local/bin/web-kiosk-browser
@@ -449,6 +449,8 @@ ExecStartPre=-/usr/bin/chvt 1
 ExecStart=/usr/sbin/runuser -u ${KIOSK_USER} -- /usr/local/bin/web-kiosk-launch
 ExecStopPost=/usr/bin/rm -rf /run/web-kiosk
 Restart=always
+SuccessExitStatus=75
+RestartPreventExitStatus=75
 RestartSec=2
 TTYPath=/dev/tty1
 TTYReset=yes
@@ -476,8 +478,8 @@ WantedBy=multi-user.target
 EOF
 
 cat >/etc/udev/rules.d/99-web-kiosk-drm.rules <<'EOF'
-# Restart web-kiosk.service when a display is connected/disconnected
-ACTION=="change", SUBSYSTEM=="drm", RUN+="/usr/bin/systemctl try-restart web-kiosk.service"
+# Start or restart local display service when a display is connected/disconnected.
+ACTION=="change", SUBSYSTEM=="drm", RUN+="/usr/bin/systemctl restart web-kiosk.service"
 EOF
 udevadm control --reload-rules 2>/dev/null || true
 
