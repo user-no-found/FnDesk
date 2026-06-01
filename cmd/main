@@ -10,6 +10,8 @@ PORT="${TRIM_SERVICE_PORT:-18733}"
 DISPLAY_ID="${FNDESK_WEB_DISPLAY:-:99}"
 VNC_PORT="${FNDESK_VNC_PORT:-5901}"
 SCREEN_GEOMETRY="${FNDESK_WEB_GEOMETRY:-1920x1080}"
+# Web 会话空闲多少秒无连接后自动回收 Xvnc+Edge（websockify 仍留守）。0=不自动回收。
+IDLE_TIMEOUT="${FNDESK_IDLE_TIMEOUT:-180}"
 NOVNC_WEB_ROOT="${PKG_VAR}/novnc-web"
 FALLBACK_PID_FILE="${PKG_VAR}/fndesk-fallback.pid"
 XVNC_PID_FILE="${PKG_VAR}/fndesk-xvnc.pid"
@@ -115,7 +117,9 @@ status_process() {
     if pid_alive "${FALLBACK_PID_FILE}"; then
         return 0
     fi
-    if pid_alive "${WEBSOCKIFY_PID_FILE}" && pid_alive "${XVNC_PID_FILE}" && pid_alive "${EDGE_PID_FILE}"; then
+    # websockify 常驻即视为运行中（含“已挂起”态：Xvnc/Edge 被回收但 websockify
+    # 仍在监听 18733），避免 fnOS 因 status 失败而重启整套服务、打断按需挂起。
+    if pid_alive "${WEBSOCKIFY_PID_FILE}"; then
         return 0
     fi
     return 3
@@ -131,6 +135,7 @@ stop_process() {
     stop_pid_file "${XVNC_PID_FILE}"
     stop_pid_file "${FALLBACK_PID_FILE}"
     pkill -TERM -f "Xvnc ${DISPLAY_ID} .*fndesk" >> "${LOG_FILE}" 2>&1 || true
+    kill_xvnc_display
     pkill -TERM -f "fndesk-window-sync-$(display_number)" >> "${LOG_FILE}" 2>&1 || true
     pkill -TERM -f "vncconfig -nowin" >> "${LOG_FILE}" 2>&1 || true
     pkill -TERM -f "microsoft-edge-stable .*fndesk.*/web-edge-profile" >> "${LOG_FILE}" 2>&1 || true
@@ -237,7 +242,7 @@ start_web_edge() {
         LC_ALL=zh_CN.UTF-8 \
         dbus-run-session -- microsoft-edge-stable \
             --user-data-dir="${profile_dir}" \
-            --start-maximized \
+            --window-position=0,0 \
             --ozone-platform=x11 \
             --disable-gpu \
             --disable-gpu-compositing \
@@ -258,7 +263,13 @@ start_web_edge() {
         log_msg "Edge window sync failed to stay running."
         return 1
     fi
+    return 0
+}
 
+start_websockify() {
+    if pid_alive "${WEBSOCKIFY_PID_FILE}"; then
+        return 0
+    fi
     log_msg "Starting noVNC/websockify on 0.0.0.0:${PORT}."
     prepare_novnc_web
     local ws_tls_args=()
@@ -269,11 +280,83 @@ start_web_edge() {
         log_msg "Websockify TLS disabled; cert/key missing."
     fi
     FNDESK_WEB_DISPLAY="${DISPLAY_ID}" \
+    FNDESK_MAIN="${SCRIPT_DIR}/main" \
+    FNDESK_IDLE_TIMEOUT="${IDLE_TIMEOUT}" \
         python3 "${APP_DEST}/server/fndesk-ws.py" "${ws_tls_args[@]}" --web "${NOVNC_WEB_ROOT}" "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" >> "${LOG_FILE}" 2>&1 &
     printf "%s" "$!" > "${WEBSOCKIFY_PID_FILE}"
     sleep 1
-
     pid_alive "${WEBSOCKIFY_PID_FILE}"
+}
+
+# 仅回收会话层（Xvnc/vncconfig/Edge/window-sync），websockify 留守 18733。
+web_down() {
+    mkdir -p "${PKG_VAR}"
+    log_msg "Suspending Web Edge session (keeping websockify on ${PORT})."
+    stop_pid_file "${WINDOW_SYNC_PID_FILE}"
+    stop_pid_file "${EDGE_PID_FILE}"
+    stop_pid_file "${VNCCONFIG_PID_FILE}"
+    stop_pid_file "${XVNC_PID_FILE}"
+    pkill -TERM -f "fndesk-window-sync-$(display_number)" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "vncconfig -nowin" >> "${LOG_FILE}" 2>&1 || true
+    pkill -TERM -f "microsoft-edge-stable .*fndesk.*/web-edge-profile" >> "${LOG_FILE}" 2>&1 || true
+    # 真正的 Xvnc 命令行是 "Xvnc :99 -geometry ..."（不含 fndesk），且通过 runuser
+    # 包装启动，PID 文件里记录的是 runuser，被孤儿化后仍会占住 :99 和 rfbport。
+    # 这里直接按显示号匹配 Xvnc 进程本身，确保彻底回收并等待端口释放。
+    kill_xvnc_display
+    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
+}
+
+# 按显示号杀掉残留的 Xvnc，并等待 rfbport 释放，避免下次启动端口被占。
+kill_xvnc_display() {
+    local n
+    n="$(display_number)"
+    pkill -TERM -f "Xvnc :${n}( |$)" >> "${LOG_FILE}" 2>&1 || true
+    # 兜底：按精确参数匹配（geometry/rfbport），覆盖 pgrep 行为差异。
+    pkill -TERM -f "Xvnc :${n} .*-rfbport ${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
+    local i
+    for i in 1 2 3 4 5; do
+        if ! pgrep -f "Xvnc :${n}( |$)" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    pkill -KILL -f "Xvnc :${n}( |$)" >> "${LOG_FILE}" 2>&1 || true
+    sleep 1
+}
+
+# 拉起会话层；websockify 不在则一并拉起。供按需恢复使用。
+web_up() {
+    if pid_alive "${XVNC_PID_FILE}" && pid_alive "${EDGE_PID_FILE}"; then
+        log_msg "Web Edge session already up."
+        start_websockify
+        return $?
+    fi
+
+    local missing
+    missing="$(missing_deps | paste -sd ' ' -)"
+    if [ -n "${missing}" ]; then
+        log_msg "web_up aborted; missing deps: ${missing}"
+        return 1
+    fi
+
+    local kiosk_user
+    kiosk_user="$(resolve_kiosk_user)"
+    if [ -z "${kiosk_user}" ]; then
+        log_msg "web_up aborted; no kiosk user."
+        return 1
+    fi
+
+    # 清理破损的半死会话（如 Xvnc 残留但 Edge 已退出、或 PID 文件指向已被
+    # 孤儿化的 runuser 包装进程），否则旧 Xvnc 仍占着 :99/rfbport，新会话起不来。
+    web_down
+
+    if start_web_edge "${kiosk_user}"; then
+        start_websockify
+        return $?
+    fi
+    log_msg "web_up failed to start session."
+    web_down
+    return 1
 }
 
 start_process() {
@@ -298,11 +381,14 @@ start_process() {
         return $?
     fi
 
-    if start_web_edge "${kiosk_user}"; then
+    # 只常驻 websockify（守 18733）。真正的 Xvnc+Edge 会话由前端连接时按需
+    # 通过 web-up 拉起，空闲时 web-down 回收，从而避免“打开后一直占后台”。
+    if start_websockify; then
+        log_msg "FnDesk web frontend ready on ${PORT}; session starts on demand."
         return 0
     fi
 
-    log_msg "Web Edge failed to start; showing fallback page instead."
+    log_msg "websockify failed to start; showing fallback page instead."
     stop_process
     start_fallback "web-edge-start-failed"
 }
@@ -312,5 +398,7 @@ start) start_process ;;
 stop) stop_process ;;
 status) status_process ;;
 restart) stop_process; start_process ;;
+web-up) web_up ;;
+web-down) web_down ;;
 *) exit 1 ;;
 esac

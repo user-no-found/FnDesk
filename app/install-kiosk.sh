@@ -315,6 +315,14 @@ export XCURSOR_SIZE=24
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 700 "${XDG_RUNTIME_DIR}"
 
+# 用户主动“关闭本地 Edge”后会留下抑制标记。即使 udev 因 DRM change（cage 释放
+# 显示器本身就会触发）再次 restart 本服务，也直接进入空闲，避免被自动拉起。
+# “启动/重启本地 Edge”会清除该标记。
+if [[ -f /etc/web-kiosk/local-disabled ]]; then
+  echo "FnDesk local display: disabled by user; staying idle." >&2
+  exit 75
+fi
+
 if [[ -n "${KIOSK_OUTPUT:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
   wlr-randr --output "${KIOSK_OUTPUT}" --on || true
 fi
