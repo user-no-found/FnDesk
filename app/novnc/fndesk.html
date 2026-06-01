@@ -19,6 +19,13 @@
     #https-banner button { height: 26px; border: 0; border-radius: 4px; padding: 0 9px; color: #111827; background: #f9fafb; font: inherit; cursor: pointer; }
     #https-banner button.icon { width: 26px; padding: 0; color: #fff; background: transparent; font-size: 18px; line-height: 24px; }
     #ime-proxy { position: fixed; left: 12px; top: 12px; z-index: 3; width: 2px; height: 1.2em; padding: 0; border: 0; outline: 0; resize: none; opacity: 0; color: transparent; background: transparent; caret-color: transparent; pointer-events: none; overflow: hidden; }
+    #toolbar { position: fixed; right: 12px; bottom: 12px; z-index: 5; display: flex; align-items: flex-end; gap: 8px; }
+    #toolbar .menu { display: none; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3); }
+    #toolbar.open .menu { display: flex; }
+    #toolbar button { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #fff; background: rgba(15, 23, 42, 0.78); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 6px; padding: 7px 11px; cursor: pointer; white-space: nowrap; text-align: left; }
+    #toolbar button:hover { background: rgba(30, 41, 59, 0.95); }
+    #toolbar button.danger { border-color: #ef4444; }
+    #toolbar #fab { border-radius: 999px; padding: 8px 12px; background: rgba(15, 23, 42, 0.85); }
   </style>
   <script>
     window.addEventListener('error', event => {
@@ -72,6 +79,8 @@
     let statusTimer = 0;
     let pasteShortcutTimer = 0;
     let remoteClipboardText = '';
+    let manualClose = false;   // 用户主动点“关闭 Web 后台”，切回时不自动重连
+    let sessionLost = false;   // 当前 RFB 连接已断开
     const suppressedKeyUps = new Set();
     const activeModifiers = new Map();
     const remoteModifiers = new Map();
@@ -115,57 +124,84 @@
     };
 
     setStatus('Connecting');
-    const rfb = new RFB(screen, url, { credentials: { password } });
+    let rfb = null;
 
-    rfb.viewOnly = false;
-    rfb.clipViewport = false;
-    rfb.scaleViewport = false;
-    rfb.resizeSession = true;
-    rfb.qualityLevel = 6;
-    rfb.compressionLevel = 2;
+    // 远端桌面尺寸严格等于 iframe 可视区（CSS 像素、取整、不含滚动条）。
+    // 这样 noVNC 会把 Xvnc 的桌面 SetDesktopSize 成“应用区域”大小，
+    // 既不会留黑边，也不会超出当前 FnDesk 窗口。注意不要去写死 #screen 的
+    // style 尺寸，否则容器会被钉死、之后无法再自适应。
+    function viewportSize() {
+      const w = Math.max(1, Math.floor(document.documentElement.clientWidth || window.innerWidth || 0));
+      const h = Math.max(1, Math.floor(document.documentElement.clientHeight || window.innerHeight || 0));
+      return { w, h };
+    }
 
-    rfb._screenSize = () => ({
-      w: Math.max(1, Math.floor(window.innerWidth || document.documentElement.clientWidth || screen.clientWidth || 1600)),
-      h: Math.max(1, Math.floor(window.innerHeight || document.documentElement.clientHeight || screen.clientHeight || 900)),
-    });
-
-    rfb.addEventListener('connect', () => {
-      setStatus('');
-      syncRemoteSize(true);
-      focusImeProxy();
-    });
-    rfb.addEventListener('disconnect', event => {
-      setStatus(event.detail.clean ? 'Disconnected' : 'Connection closed');
-    });
-    rfb.addEventListener('credentialsrequired', () => {
-      const value = window.prompt('Password Required:');
-      rfb.sendCredentials({ password: value || '' });
-    });
-    rfb.addEventListener('clipboard', event => {
-      handleRemoteClipboard(event.detail.text || '');
-    });
-
-    function syncRemoteSize(immediate = false) {
-      rfb.scaleViewport = false;
-      rfb.resizeSession = true;
-      screen.style.width = `${Math.max(1, window.innerWidth)}px`;
-      screen.style.height = `${Math.max(1, window.innerHeight)}px`;
-
+    function requestRemoteResize(immediate = false) {
+      if (!rfb) return;
       clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        if (typeof rfb._requestRemoteResize === 'function') {
+        if (rfb && typeof rfb._requestRemoteResize === 'function') {
           rfb._requestRemoteResize();
         }
-      }, immediate ? 50 : 250);
+      }, immediate ? 0 : 200);
     }
 
-    window.addEventListener('resize', syncRemoteSize);
+    function connect() {
+      manualClose = false;
+      sessionLost = false;
+      setStatus('Connecting');
+      rfb = new RFB(screen, url, { credentials: { password } });
+      rfb.viewOnly = false;
+      rfb.clipViewport = false;
+      rfb.scaleViewport = false;
+      rfb.resizeSession = true;
+      rfb.qualityLevel = 6;
+      rfb.compressionLevel = 2;
+      rfb._screenSize = viewportSize;
+
+      rfb.addEventListener('connect', () => {
+        sessionLost = false;
+        setStatus('');
+        // iframe 首屏布局、字体加载、应用中心面板展开动画都会改变可视区尺寸，
+        // 连接后按几个时间点补发请求，确保最终对齐当前应用区域。
+        [0, 150, 400, 800, 1500].forEach(delay => window.setTimeout(() => requestRemoteResize(true), delay));
+        focusImeProxy();
+      });
+      rfb.addEventListener('disconnect', event => {
+        sessionLost = true;
+        if (manualClose) {
+          setStatus('Web 后台已关闭。关闭本页或重新打开应用即可重新连接。');
+        } else {
+          setStatus(event.detail && event.detail.clean ? 'Disconnected' : 'Connection closed');
+        }
+      });
+      rfb.addEventListener('credentialsrequired', () => {
+        const value = window.prompt('Password Required:');
+        rfb.sendCredentials({ password: value || '' });
+      });
+      rfb.addEventListener('clipboard', event => {
+        handleRemoteClipboard(event.detail.text || '');
+      });
+    }
+
+    // 重连：唤醒后台会话并重建 RFB（用户主动关闭后不自动重连）。
+    async function reconnect() {
+      if (manualClose || !sessionLost) return;
+      try { await fetch('/app/fndesk/api/web/wake', { method: 'POST', cache: 'no-store' }); }
+      catch (e) { /* 服务端 new_websocket_client 也会兜底唤醒 */ }
+      connect();
+    }
+
+    connect();
+
+    window.addEventListener('resize', () => requestRemoteResize());
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', syncRemoteSize);
+      window.visualViewport.addEventListener('resize', () => requestRemoteResize());
     }
-    window.addEventListener('pageshow', () => syncRemoteSize(true));
+    window.addEventListener('pageshow', () => requestRemoteResize(true));
 
-    new ResizeObserver(() => syncRemoteSize()).observe(screen);
+    // 观察 iframe 文档尺寸变化（应用中心拖动/缩放面板、窗口最大化时触发）。
+    new ResizeObserver(() => requestRemoteResize()).observe(document.documentElement);
 
     function focusImeProxy() {
       if (!imeProxy || document.activeElement === imeProxy) return;
@@ -532,6 +568,78 @@
         focusImeProxy();
       });
     }
+
+    // ---- 控制工具条：本地端 开/重启/关，以及关闭 Web 后台 ----
+    const toolbar = document.getElementById('toolbar');
+    const fab = document.getElementById('fab');
+    fab.addEventListener('click', () => {
+      toolbar.classList.toggle('open');
+      focusImeProxy();
+    });
+
+    async function callApi(path, opts) {
+      try {
+        return await fetch(path, Object.assign({ method: 'POST', cache: 'no-store' }, opts || {}));
+      } catch (err) {
+        flashStatus('操作失败: ' + err);
+        return null;
+      }
+    }
+
+    function bindControl(id, path, okText) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('click', async () => {
+        toolbar.classList.remove('open');
+        flashStatus('执行中…');
+        const res = await callApi(path);
+        if (res && res.ok) flashStatus(okText);
+        else if (res) flashStatus('失败 (' + res.status + ')');
+        focusImeProxy();
+      });
+    }
+
+    bindControl('btn-local-start', '/app/fndesk/api/local/start', '本地 Edge 已启动');
+    bindControl('btn-local-restart', '/app/fndesk/api/local/restart', '本地 Edge 已重启');
+    bindControl('btn-local-stop', '/app/fndesk/api/local/stop', '本地 Edge 已关闭');
+
+    // “关闭 Web 后台”：立刻回收远端 Xvnc+Edge，并断开当前连接。
+    document.getElementById('btn-web-suspend').addEventListener('click', async () => {
+      toolbar.classList.remove('open');
+      manualClose = true;
+      flashStatus('正在关闭 Web 后台…');
+      suspendWebBackground(false);
+      try { if (rfb) rfb.disconnect(); } catch (e) { /* ignore */ }
+      setStatus('Web 后台已关闭。关闭本页或重新打开应用即可重新连接。');
+    });
+
+    // 关闭应用窗口 / 切走标签页时，自动通知服务端回收 Web 后台，避免常驻占用。
+    // 用 sendBeacon 保证在页面卸载阶段也能发出请求。
+    function suspendWebBackground(useBeacon) {
+      const url = '/app/fndesk/api/web/suspend';
+      if (useBeacon && navigator.sendBeacon) {
+        try { navigator.sendBeacon(url, new Blob([], { type: 'text/plain' })); return; }
+        catch (e) { /* fall through */ }
+      }
+      callApi(url, { keepalive: true });
+    }
+
+    window.addEventListener('pagehide', () => {
+      if (!manualClose) suspendWebBackground(true);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        // 切走/最小化：回收后台。注意不置 manualClose，切回时自动重连。
+        if (!manualClose && !sessionLost) {
+          try { if (rfb) rfb.disconnect(); } catch (e) { /* ignore */ }
+          suspendWebBackground(true);
+        }
+      } else if (document.visibilityState === 'visible') {
+        // 切回：若此前因切走而断开，则唤醒并重连。
+        reconnect();
+        requestRemoteResize(true);
+      }
+    });
     }
 
     if (document.readyState === 'loading') {
@@ -554,6 +662,15 @@
     <button id="close-https" class="icon" type="button" aria-label="关闭">×</button>
   </div>
   <div id="screen"></div>
+  <div id="toolbar">
+    <div class="menu" id="toolbar-menu">
+      <button id="btn-local-start" type="button">启动本地 Edge</button>
+      <button id="btn-local-restart" type="button">重启本地 Edge</button>
+      <button id="btn-local-stop" type="button">关闭本地 Edge</button>
+      <button id="btn-web-suspend" class="danger" type="button">关闭 Web 后台</button>
+    </div>
+    <button id="fab" type="button" aria-label="菜单">☰ 控制</button>
+  </div>
   <textarea id="ime-proxy" aria-hidden="true" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
 </body>
 </html>
