@@ -82,26 +82,7 @@ default_kiosk_user()
     getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $6 ~ /^\// && $7 !~ /(nologin|false)$/ { print $1; exit }'
 }
 
-stop_runtime()
-{
-    pkill -TERM -f 'Xvnc :99 .*fndesk' 2>/dev/null || true
-    pkill -TERM -f 'vncconfig -nowin' 2>/dev/null || true
-    pkill -TERM -f 'fndesk-window-sync-99' 2>/dev/null || true
-    pkill -TERM -f 'microsoft-edge-stable .*fndesk.*/web-edge-profile' 2>/dev/null || true
-    pkill -TERM -f 'fcitx5.*fndesk-web-runtime' 2>/dev/null || true
-    pkill -TERM -f 'websockify .*18733' 2>/dev/null || true
-    rm -rf /tmp/fndesk-web-runtime-* 2>/dev/null || true
-    rm -rf /var/tmp/fndesk-web-runtime-* 2>/dev/null || true
-}
-
-stop_all_runtime()
-{
-    systemctl disable --now web-kiosk.service 2>/dev/null || true
-    systemctl disable --now web-kiosk-display-power.service 2>/dev/null || true
-    stop_runtime
-}
-
-load_web_kiosk_config()
+load_fndesk_config()
 {
     KIOSK_USER=""
     KIOSK_OUTPUT=""
@@ -109,41 +90,89 @@ load_web_kiosk_config()
     FNDESK_CREATED_EDGE_KEY="0"
     FNDESK_CREATED_EDGE_REPO="0"
 
-    if [ -f /etc/default/web-kiosk ]; then
+    if [ -f /etc/default/fndesk ]; then
+        # shellcheck disable=SC1091
+        . /etc/default/fndesk
+    elif [ -f /etc/default/web-kiosk ]; then
         # shellcheck disable=SC1091
         . /etc/default/web-kiosk
     fi
 }
 
+stop_control_runtime()
+{
+    local pid_file="${TRIM_PKGVAR}/fndesk-control.pid"
+    local pid=""
+    if [ -f "${pid_file}" ]; then
+        pid="$(head -n 1 "${pid_file}" | tr -d '[:space:]')"
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            kill -TERM "${pid}" 2>/dev/null || true
+            sleep 1
+            kill -KILL "${pid}" 2>/dev/null || true
+        fi
+        rm -f "${pid_file}" 2>/dev/null || true
+    fi
+}
+
+stop_virtual_runtime()
+{
+    pkill -TERM -f 'Xvnc :99' 2>/dev/null || true
+    pkill -TERM -f 'vncconfig -nowin' 2>/dev/null || true
+    pkill -TERM -f 'fndesk-window-sync' 2>/dev/null || true
+    pkill -TERM -f 'microsoft-edge-stable .*fndesk.*/web-edge-profile' 2>/dev/null || true
+    pkill -TERM -f 'fcitx5.*fndesk-web-runtime' 2>/dev/null || true
+    pkill -TERM -f 'websockify .*18733' 2>/dev/null || true
+    pkill -TERM -f 'fndesk-ws.py.*18733' 2>/dev/null || true
+    pkill -TERM -f 'xclip -selection clipboard' 2>/dev/null || true
+    rm -rf /tmp/fndesk-web-runtime-* 2>/dev/null || true
+    rm -rf /var/tmp/fndesk-web-runtime-* 2>/dev/null || true
+    rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+}
+
+stop_local_runtime()
+{
+    systemctl stop fndesk-local.service 2>/dev/null || true
+    systemctl stop web-kiosk.service 2>/dev/null || true
+    rm -rf /run/fndesk-local /run/web-kiosk 2>/dev/null || true
+}
+
+stop_all_runtime()
+{
+    stop_control_runtime
+    stop_local_runtime
+    systemctl disable --now fndesk-local.service 2>/dev/null || true
+    systemctl disable --now fndesk-display-power.service 2>/dev/null || true
+    systemctl disable --now web-kiosk.service 2>/dev/null || true
+    systemctl disable --now web-kiosk-display-power.service 2>/dev/null || true
+    stop_virtual_runtime
+}
+
 clean_user_data()
 {
-    if [ "${wizard_delete_data:-false}" != "true" ]; then
-        install_log "user profile cleanup skipped"
-        return 0
-    fi
+    install_log "Edge user data cleanup skipped; FnDesk does not remove local browser profiles"
+}
 
-    load_web_kiosk_config
-
-    local kiosk_user="${KIOSK_USER:-}"
-    local kiosk_home=""
-
-    if [ -z "${kiosk_user}" ]; then
-        kiosk_user="$(default_kiosk_user)"
-    fi
-
-    if [ -n "${kiosk_user}" ] && id "${kiosk_user}" >/dev/null 2>&1; then
-        kiosk_home="$(getent passwd "${kiosk_user}" | cut -d: -f6)"
-        if [ -n "${kiosk_home}" ]; then
-            install_log "removing Web Edge profile: ${kiosk_home}/.local/share/fndesk"
-            rm -rf "${kiosk_home}/.local/share/fndesk" 2>/dev/null || true
-        fi
-    fi
+is_driver_or_base_package()
+{
+    case "$1" in
+        mesa-*|libgl*|libegl*|libgbm*|libdrm*|libva*|libvdpau*|vulkan-*|firmware-*|linux-*|xserver-*|\
+        ca-certificates|curl|gnupg|locales|dbus|dbus-user-session)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 is_removable_package()
 {
+    if is_driver_or_base_package "$1"; then
+        return 1
+    fi
+
     case "$1" in
-        cage|microsoft-edge-stable|seatd|wlr-randr|xwayland|mesa-utils|fonts-noto-cjk|adwaita-icon-theme|\
+        cage|microsoft-edge-stable|seatd|wlr-randr|xwayland|fonts-noto-cjk|adwaita-icon-theme|\
         fcitx5|fcitx5-chinese-addons|fcitx5-frontend-gtk3|fcitx5-frontend-gtk4|fcitx5-frontend-qt5|\
         tigervnc-common|tigervnc-standalone-server|tigervnc-tools|novnc|websockify|x11-utils|xdotool|xclip)
             return 0
@@ -154,30 +183,9 @@ is_removable_package()
     esac
 }
 
-fndesk_dependency_packages()
+package_installed()
 {
-    printf '%s\n' \
-        cage \
-        microsoft-edge-stable \
-        seatd \
-        wlr-randr \
-        xwayland \
-        mesa-utils \
-        fonts-noto-cjk \
-        adwaita-icon-theme \
-        fcitx5 \
-        fcitx5-chinese-addons \
-        fcitx5-frontend-gtk3 \
-        fcitx5-frontend-gtk4 \
-        fcitx5-frontend-qt5 \
-        tigervnc-common \
-        tigervnc-standalone-server \
-        tigervnc-tools \
-        novnc \
-        websockify \
-        x11-utils \
-        xdotool \
-        xclip
+    dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null | grep -q '^ii '
 }
 
 clean_dependency_packages()
@@ -187,31 +195,41 @@ clean_dependency_packages()
         return 0
     fi
 
-    load_web_kiosk_config
+    load_fndesk_config
 
     local packages=()
     local package=""
+    local seen=" "
 
-    while IFS= read -r package; do
-        if is_removable_package "${package}"; then
+    for package in ${FNDESK_INSTALLED_PACKAGES:-}; do
+        case "${seen}" in
+            *" ${package} "*) continue ;;
+        esac
+        seen="${seen}${package} "
+        if is_removable_package "${package}" && package_installed "${package}"; then
             packages+=("${package}")
+        else
+            install_log "skip package removal: ${package}"
         fi
-    done < <(fndesk_dependency_packages)
+    done
 
     if [ "${#packages[@]}" -eq 0 ]; then
-        install_log "no FnDesk dependency packages selected for removal"
+        install_log "no recorded FnDesk dependency packages to purge"
     else
-        install_log "purging FnDesk dependency packages: ${packages[*]}"
+        install_log "purging recorded FnDesk dependency packages: ${packages[*]}"
         DEBIAN_FRONTEND=noninteractive apt-get purge -y "${packages[@]}" 2>&1 | install_log || true
         dpkg --purge "${packages[@]}" 2>&1 | install_log || true
     fi
 
-    install_log "purging orphaned dependency packages"
-    DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y 2>&1 | install_log || true
+    install_log "skip apt autoremove to avoid touching fnOS graphics/driver packages"
 
-    rm -f /etc/apt/sources.list.d/microsoft-edge.list 2>/dev/null || true
-    rm -f /etc/apt/sources.list.d/microsoft-edge.sources 2>/dev/null || true
-    rm -f /etc/apt/keyrings/microsoft.gpg 2>/dev/null || true
+    if [ "${FNDESK_CREATED_EDGE_REPO:-0}" = "1" ]; then
+        rm -f /etc/apt/sources.list.d/microsoft-edge.list 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/microsoft-edge.sources 2>/dev/null || true
+    fi
+    if [ "${FNDESK_CREATED_EDGE_KEY:-0}" = "1" ]; then
+        rm -f /etc/apt/keyrings/microsoft.gpg 2>/dev/null || true
+    fi
 }
 
 clean_system_files()
@@ -219,7 +237,7 @@ clean_system_files()
     local kiosk_user=""
     local kiosk_home=""
 
-    load_web_kiosk_config
+    load_fndesk_config
     kiosk_user="${KIOSK_USER:-}"
 
     stop_all_runtime
@@ -228,22 +246,34 @@ clean_system_files()
         kiosk_home="$(getent passwd "${kiosk_user}" | cut -d: -f6)"
         if [ -n "${kiosk_home}" ] && [ -f "${kiosk_home}/.bashrc" ]; then
             sed -i '/^alias fnre=/d' "${kiosk_home}/.bashrc" 2>/dev/null || true
+            sed -i '/^alias fndesk-start=/d' "${kiosk_home}/.bashrc" 2>/dev/null || true
+            sed -i '/^alias fndesk-stop=/d' "${kiosk_home}/.bashrc" 2>/dev/null || true
             sed -i '/^alias fndesk-restart=/d' "${kiosk_home}/.bashrc" 2>/dev/null || true
         fi
     fi
 
+    rm -f /etc/systemd/system/fndesk-local.service 2>/dev/null || true
+    rm -f /etc/systemd/system/fndesk-display-power.service 2>/dev/null || true
     rm -f /etc/systemd/system/web-kiosk.service 2>/dev/null || true
     rm -f /etc/systemd/system/web-kiosk-display-power.service 2>/dev/null || true
+    rm -f /usr/local/bin/fndesk-local-launch 2>/dev/null || true
+    rm -f /usr/local/bin/fndesk-local-browser 2>/dev/null || true
+    rm -f /usr/local/bin/fndesk-display-power 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-launch 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-browser 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-display-power 2>/dev/null || true
+    rm -f /etc/default/fndesk 2>/dev/null || true
     rm -f /etc/default/web-kiosk 2>/dev/null || true
+    rm -rf /etc/fndesk 2>/dev/null || true
     rm -rf /etc/web-kiosk 2>/dev/null || true
+    rm -f /etc/opt/edge/policies/managed/fndesk.json 2>/dev/null || true
     rm -f /etc/opt/edge/policies/managed/web-kiosk.json 2>/dev/null || true
+    rm -f /etc/systemd/logind.conf.d/fndesk.conf 2>/dev/null || true
     rm -f /etc/systemd/logind.conf.d/web-kiosk.conf 2>/dev/null || true
+    rm -f /etc/systemd/sleep.conf.d/fndesk.conf 2>/dev/null || true
     rm -f /etc/systemd/sleep.conf.d/web-kiosk.conf 2>/dev/null || true
     rm -f /etc/udev/rules.d/99-web-kiosk-drm.rules 2>/dev/null || true
-    rm -rf /run/web-kiosk 2>/dev/null || true
+    rm -rf /run/fndesk-local /run/web-kiosk 2>/dev/null || true
 
     systemctl daemon-reload 2>/dev/null || true
     udevadm control --reload-rules 2>/dev/null || true
@@ -280,22 +310,8 @@ clean_app_dirs()
     fi
 }
 
-install_init()
+run_installer()
 {
-    log_step "install_init"
-    if ! is_upgrade_flow; then
-        rm -f "${TRIM_PKGVAR}/.upgrading"
-    fi
-    exit 0
-}
-
-install_callback()
-{
-    log_step "install_callback"
-    if ! is_upgrade_flow; then
-        rm -f "${TRIM_PKGVAR}/.upgrading"
-    fi
-
     $MKDIR "${TRIM_PKGVAR}"
 
     local installer=""
@@ -317,16 +333,33 @@ install_callback()
         install_log "install-kiosk.sh failed with exit code ${install_status}"
         exit "${install_status}"
     fi
+}
 
-    systemctl start web-kiosk.service 2>&1 | install_log || true
-    install_log "FnDesk install completed"
+install_init()
+{
+    log_step "install_init"
+    if ! is_upgrade_flow; then
+        rm -f "${TRIM_PKGVAR}/.upgrading"
+    fi
+    exit 0
+}
+
+install_callback()
+{
+    log_step "install_callback"
+    if ! is_upgrade_flow; then
+        rm -f "${TRIM_PKGVAR}/.upgrading"
+    fi
+
+    run_installer
+    install_log "FnDesk install completed; local Edge remains stopped until started from the control console"
     exit 0
 }
 
 uninstall_init()
 {
     log_step "uninstall_init"
-    stop_runtime
+    stop_all_runtime
     exit 0
 }
 
@@ -341,9 +374,7 @@ uninstall_callback()
 
     clean_user_data
     clean_dependency_packages
-
     clean_system_files
-
     clean_app_dirs
 
     install_log "FnDesk uninstall cleanup completed"
@@ -355,14 +386,15 @@ upgrade_init()
     log_step "upgrade_init"
     $MKDIR "${TRIM_PKGVAR}"
     date +%s > "${TRIM_PKGVAR}/.upgrading"
-    stop_runtime
+    stop_all_runtime
     exit 0
 }
 
 upgrade_callback()
 {
     log_step "upgrade_callback"
+    run_installer
     rm -f "${TRIM_PKGVAR}/.upgrading"
-    install_log "FnDesk upgrade completed"
+    install_log "FnDesk upgrade completed; local Edge remains stopped until started from the control console"
     exit 0
 }

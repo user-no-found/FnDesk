@@ -3,38 +3,25 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PKG_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
-APP_DEST="${TRIM_APPDEST:-${PKG_ROOT}}"
+APP_DEST=""
+for candidate in \
+    "${TRIM_APPDEST:-}" \
+    "${TRIM_APPDEST:-}/app" \
+    "${PKG_ROOT}" \
+    "${PKG_ROOT}/app"
+do
+    if [ -n "${candidate}" ] && [ -f "${candidate}/server/fndesk-server.py" ]; then
+        APP_DEST="${candidate}"
+        break
+    fi
+done
+if [ -z "${APP_DEST}" ]; then
+    APP_DEST="${TRIM_APPDEST:-${PKG_ROOT}}"
+fi
 PKG_VAR="${TRIM_PKGVAR:-${PKG_ROOT}/var}"
 LOG_FILE="${PKG_VAR}/fndesk.log"
 PORT="${TRIM_SERVICE_PORT:-18733}"
-DISPLAY_ID="${FNDESK_WEB_DISPLAY:-:99}"
-VNC_PORT="${FNDESK_VNC_PORT:-5901}"
-SCREEN_GEOMETRY="${FNDESK_WEB_GEOMETRY:-1920x1080}"
-# Web 会话空闲多少秒无连接后自动回收 Xvnc+Edge（websockify 仍留守）。0=不自动回收。
-IDLE_TIMEOUT="${FNDESK_IDLE_TIMEOUT:-180}"
-NOVNC_WEB_ROOT="${PKG_VAR}/novnc-web"
-FALLBACK_PID_FILE="${PKG_VAR}/fndesk-fallback.pid"
-XVNC_PID_FILE="${PKG_VAR}/fndesk-xvnc.pid"
-VNCCONFIG_PID_FILE="${PKG_VAR}/fndesk-vncconfig.pid"
-EDGE_PID_FILE="${PKG_VAR}/fndesk-edge.pid"
-WINDOW_SYNC_PID_FILE="${PKG_VAR}/fndesk-window-sync.pid"
-WEBSOCKIFY_PID_FILE="${PKG_VAR}/fndesk-websockify.pid"
-RUNUSER_BIN="${FNDESK_RUNUSER:-/usr/sbin/runuser}"
-
-if [ -f /etc/default/web-kiosk ]; then
-    # shellcheck disable=SC1091
-    . /etc/default/web-kiosk
-fi
-TLS_CERT="${FNDESK_TLS_CERT:-/etc/web-kiosk/fndesk-cert.pem}"
-TLS_KEY="${FNDESK_TLS_KEY:-/etc/web-kiosk/fndesk-key.pem}"
-
-if [ ! -x "${RUNUSER_BIN}" ]; then
-    RUNUSER_BIN="$(command -v runuser 2>/dev/null || true)"
-fi
-
-display_number() {
-    printf '%s' "${DISPLAY_ID#:}"
-}
+CONTROL_PID_FILE="${PKG_VAR}/fndesk-control.pid"
 
 log_msg() {
     mkdir -p "$(dirname "${LOG_FILE}")"
@@ -46,13 +33,15 @@ check_process() {
     [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
 }
 
-pid_alive() {
+control_pid_alive() {
     local file="$1"
     local pid=""
     if [ -f "${file}" ]; then
         pid=$(head -n 1 "${file}" | tr -d '[:space:]')
-        check_process "${pid}"
-        return $?
+        if check_process "${pid}" && tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q 'fndesk-server.py'; then
+            return 0
+        fi
+        rm -f "${file}" 2>/dev/null || true
     fi
     return 1
 }
@@ -62,335 +51,40 @@ stop_pid_file() {
     local pid=""
     if [ -f "${file}" ]; then
         pid=$(head -n 1 "${file}" | tr -d '[:space:]')
-        if check_process "${pid}"; then
+        if check_process "${pid}" && tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | grep -q 'fndesk-server.py'; then
             kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1 || true
             sleep 1
-            kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1 || true
+            if check_process "${pid}"; then
+                kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1 || true
+            fi
         fi
         rm -f "${file}"
     fi
 }
 
-missing_deps() {
-    local missing=()
-    local cmd
-    for cmd in Xvnc websockify microsoft-edge-stable xdpyinfo xdotool vncconfig xclip python3; do
-        if ! command -v "${cmd}" >/dev/null 2>&1; then
-            missing+=("${cmd}")
-        fi
-    done
-    if [ -z "${RUNUSER_BIN}" ]; then
-        missing+=("runuser")
-    fi
-    if [ ! -f /usr/share/novnc/vnc_lite.html ]; then
-        missing+=("novnc")
-    fi
-    printf '%s\n' "${missing[@]}"
-}
-
-prepare_novnc_web() {
-    rm -rf "${NOVNC_WEB_ROOT}"
-    mkdir -p "${NOVNC_WEB_ROOT}" "${NOVNC_WEB_ROOT}/app/fndesk" "${NOVNC_WEB_ROOT}/app"
-    cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/fndesk.html"
-    cp "${APP_DEST}/novnc/fndesk.html" "${NOVNC_WEB_ROOT}/app/fndesk/index.html"
-    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/core"
-    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/vendor"
-    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/app/core"
-    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/app/vendor"
-    ln -s /usr/share/novnc/core "${NOVNC_WEB_ROOT}/app/fndesk/core"
-    ln -s /usr/share/novnc/vendor "${NOVNC_WEB_ROOT}/app/fndesk/vendor"
-}
-
-resolve_kiosk_user() {
-    if [ -f /etc/default/web-kiosk ]; then
-        # shellcheck disable=SC1091
-        . /etc/default/web-kiosk
-    fi
-    if [ -n "${KIOSK_USER:-}" ] && id "${KIOSK_USER}" >/dev/null 2>&1; then
-        printf '%s' "${KIOSK_USER}"
-        return 0
-    fi
-    getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 && $6 ~ /^\// && $7 !~ /(nologin|false)$/ { print $1; exit }'
-}
-
 status_process() {
-    if pid_alive "${FALLBACK_PID_FILE}"; then
-        return 0
-    fi
-    # websockify 常驻即视为运行中（含“已挂起”态：Xvnc/Edge 被回收但 websockify
-    # 仍在监听 18733），避免 fnOS 因 status 失败而重启整套服务、打断按需挂起。
-    if pid_alive "${WEBSOCKIFY_PID_FILE}"; then
-        return 0
-    fi
-    return 3
+    control_pid_alive "${CONTROL_PID_FILE}"
 }
 
 stop_process() {
     mkdir -p "${PKG_VAR}"
-    log_msg "Stopping FnDesk Web Edge session."
-    stop_pid_file "${WEBSOCKIFY_PID_FILE}"
-    stop_pid_file "${WINDOW_SYNC_PID_FILE}"
-    stop_pid_file "${EDGE_PID_FILE}"
-    stop_pid_file "${VNCCONFIG_PID_FILE}"
-    stop_pid_file "${XVNC_PID_FILE}"
-    stop_pid_file "${FALLBACK_PID_FILE}"
-    pkill -TERM -f "Xvnc ${DISPLAY_ID} .*fndesk" >> "${LOG_FILE}" 2>&1 || true
-    kill_xvnc_display
-    pkill -TERM -f "fndesk-window-sync-$(display_number)" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "vncconfig -nowin" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "microsoft-edge-stable .*fndesk.*/web-edge-profile" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "websockify .*${PORT}.*${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "fndesk-ws.py.*${PORT}.*${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "xclip -selection clipboard" >> "${LOG_FILE}" 2>&1 || true
-    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
-    sleep 1
-}
-
-start_fallback() {
-    local missing="$1"
-    mkdir -p "${PKG_VAR}"
-    log_msg "Starting fallback page. Missing dependencies: ${missing}"
-    FNDESK_MISSING_DEPS="${missing}" TRIM_APPDEST="${APP_DEST}" TRIM_PKGVAR="${PKG_VAR}" TRIM_SERVICE_PORT="${PORT}" \
-        nohup python3 "${APP_DEST}/server/fndesk-server.py" >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${FALLBACK_PID_FILE}"
-    sleep 1
-    pid_alive "${FALLBACK_PID_FILE}"
-}
-
-start_window_sync() {
-    local kiosk_user="$1"
-    local user_home="$2"
-    local runtime_dir="$3"
-
-    if [ ! -x "${APP_DEST}/window-sync.sh" ]; then
-        log_msg "Window sync script is missing: ${APP_DEST}/window-sync.sh"
-        return 1
-    fi
-
-    log_msg "Starting Edge window sync for Web display."
-    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
-        DISPLAY="${DISPLAY_ID}" \
-        XDG_RUNTIME_DIR="${runtime_dir}" \
-        HOME="${user_home}" \
-        LANG=zh_CN.UTF-8 \
-        FNDESK_WINDOW_SYNC_NAME="fndesk-window-sync-$(display_number)" \
-        "${APP_DEST}/window-sync.sh" >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${WINDOW_SYNC_PID_FILE}"
-    sleep 1
-    pid_alive "${WINDOW_SYNC_PID_FILE}"
-}
-
-start_web_edge() {
-    local kiosk_user="$1"
-    local user_home
-    local user_group
-    local runtime_dir
-    local profile_dir
-
-    user_home="$(getent passwd "${kiosk_user}" | cut -d: -f6)"
-    user_group="$(id -gn "${kiosk_user}")"
-    runtime_dir="/tmp/fndesk-web-runtime-${kiosk_user}"
-    profile_dir="${user_home}/.local/share/fndesk/web-edge-profile"
-
-    mkdir -p "${PKG_VAR}" "${runtime_dir}" "${profile_dir}"
-    chown "${kiosk_user}:${user_group}" "${runtime_dir}" "${profile_dir}" 2>/dev/null || true
-    chmod 700 "${runtime_dir}" 2>/dev/null || true
-    chmod 700 "${profile_dir}" 2>/dev/null || true
-
-    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
-
-    log_msg "Starting Xvnc on ${DISPLAY_ID}."
-    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
-        XDG_RUNTIME_DIR="${runtime_dir}" \
-        HOME="${user_home}" \
-        LANG=zh_CN.UTF-8 \
-        LANGUAGE=zh_CN:zh \
-        LC_ALL=zh_CN.UTF-8 \
-        Xvnc "${DISPLAY_ID}" \
-            -geometry "${SCREEN_GEOMETRY}" \
-            -depth 24 \
-            -localhost \
-            -SecurityTypes None \
-            -rfbport "${VNC_PORT}" \
-            -AlwaysShared \
-            -AcceptSetDesktopSize=1 \
-            -ac >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${XVNC_PID_FILE}"
-    sleep 1
-    if ! pid_alive "${XVNC_PID_FILE}"; then
-        log_msg "Xvnc failed to stay running."
-        return 1
-    fi
-
-    log_msg "Starting vncconfig for Web clipboard sync."
-    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
-        DISPLAY="${DISPLAY_ID}" \
-        XDG_RUNTIME_DIR="${runtime_dir}" \
-        HOME="${user_home}" \
-        LANG=zh_CN.UTF-8 \
-        vncconfig -nowin >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${VNCCONFIG_PID_FILE}"
-    sleep 1
-
-    log_msg "Starting Edge for Web display as ${kiosk_user}; profile=${profile_dir}."
-    "${RUNUSER_BIN}" -u "${kiosk_user}" -- env \
-        DISPLAY="${DISPLAY_ID}" \
-        XDG_RUNTIME_DIR="${runtime_dir}" \
-        HOME="${user_home}" \
-        LANG=zh_CN.UTF-8 \
-        LANGUAGE=zh_CN:zh \
-        LC_ALL=zh_CN.UTF-8 \
-        dbus-run-session -- microsoft-edge-stable \
-            --user-data-dir="${profile_dir}" \
-            --window-position=0,0 \
-            --ozone-platform=x11 \
-            --disable-gpu \
-            --disable-gpu-compositing \
-            --disable-dev-shm-usage \
-            --lang=zh-CN \
-            --no-first-run \
-            --no-default-browser-check \
-            --password-store=basic \
-            --disable-session-crashed-bubble \
-            --disable-infobars >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${EDGE_PID_FILE}"
-    sleep 2
-    if ! pid_alive "${EDGE_PID_FILE}"; then
-        log_msg "Edge failed to stay running."
-        return 1
-    fi
-    if ! start_window_sync "${kiosk_user}" "${user_home}" "${runtime_dir}"; then
-        log_msg "Edge window sync failed to stay running."
-        return 1
-    fi
-    return 0
-}
-
-start_websockify() {
-    if pid_alive "${WEBSOCKIFY_PID_FILE}"; then
-        return 0
-    fi
-    log_msg "Starting noVNC/websockify on 0.0.0.0:${PORT}."
-    prepare_novnc_web
-    local ws_tls_args=()
-    if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
-        ws_tls_args=(--cert "${TLS_CERT}" --key "${TLS_KEY}")
-        log_msg "Websockify TLS enabled (cert=${TLS_CERT})."
-    else
-        log_msg "Websockify TLS disabled; cert/key missing."
-    fi
-    FNDESK_WEB_DISPLAY="${DISPLAY_ID}" \
-    FNDESK_MAIN="${SCRIPT_DIR}/main" \
-    FNDESK_IDLE_TIMEOUT="${IDLE_TIMEOUT}" \
-        python3 "${APP_DEST}/server/fndesk-ws.py" "${ws_tls_args[@]}" --web "${NOVNC_WEB_ROOT}" "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" >> "${LOG_FILE}" 2>&1 &
-    printf "%s" "$!" > "${WEBSOCKIFY_PID_FILE}"
-    sleep 1
-    pid_alive "${WEBSOCKIFY_PID_FILE}"
-}
-
-# 仅回收会话层（Xvnc/vncconfig/Edge/window-sync），websockify 留守 18733。
-web_down() {
-    mkdir -p "${PKG_VAR}"
-    log_msg "Suspending Web Edge session (keeping websockify on ${PORT})."
-    stop_pid_file "${WINDOW_SYNC_PID_FILE}"
-    stop_pid_file "${EDGE_PID_FILE}"
-    stop_pid_file "${VNCCONFIG_PID_FILE}"
-    stop_pid_file "${XVNC_PID_FILE}"
-    pkill -TERM -f "fndesk-window-sync-$(display_number)" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "vncconfig -nowin" >> "${LOG_FILE}" 2>&1 || true
-    pkill -TERM -f "microsoft-edge-stable .*fndesk.*/web-edge-profile" >> "${LOG_FILE}" 2>&1 || true
-    # 真正的 Xvnc 命令行是 "Xvnc :99 -geometry ..."（不含 fndesk），且通过 runuser
-    # 包装启动，PID 文件里记录的是 runuser，被孤儿化后仍会占住 :99 和 rfbport。
-    # 这里直接按显示号匹配 Xvnc 进程本身，确保彻底回收并等待端口释放。
-    kill_xvnc_display
-    rm -f "/tmp/.X$(display_number)-lock" "/tmp/.X11-unix/X$(display_number)" 2>/dev/null || true
-}
-
-# 按显示号杀掉残留的 Xvnc，并等待 rfbport 释放，避免下次启动端口被占。
-kill_xvnc_display() {
-    local n
-    n="$(display_number)"
-    pkill -TERM -f "Xvnc :${n}( |$)" >> "${LOG_FILE}" 2>&1 || true
-    # 兜底：按精确参数匹配（geometry/rfbport），覆盖 pgrep 行为差异。
-    pkill -TERM -f "Xvnc :${n} .*-rfbport ${VNC_PORT}" >> "${LOG_FILE}" 2>&1 || true
-    local i
-    for i in 1 2 3 4 5; do
-        if ! pgrep -f "Xvnc :${n}( |$)" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 1
-    done
-    pkill -KILL -f "Xvnc :${n}( |$)" >> "${LOG_FILE}" 2>&1 || true
-    sleep 1
-}
-
-# 拉起会话层；websockify 不在则一并拉起。供按需恢复使用。
-web_up() {
-    if pid_alive "${XVNC_PID_FILE}" && pid_alive "${EDGE_PID_FILE}"; then
-        log_msg "Web Edge session already up."
-        start_websockify
-        return $?
-    fi
-
-    local missing
-    missing="$(missing_deps | paste -sd ' ' -)"
-    if [ -n "${missing}" ]; then
-        log_msg "web_up aborted; missing deps: ${missing}"
-        return 1
-    fi
-
-    local kiosk_user
-    kiosk_user="$(resolve_kiosk_user)"
-    if [ -z "${kiosk_user}" ]; then
-        log_msg "web_up aborted; no kiosk user."
-        return 1
-    fi
-
-    # 清理破损的半死会话（如 Xvnc 残留但 Edge 已退出、或 PID 文件指向已被
-    # 孤儿化的 runuser 包装进程），否则旧 Xvnc 仍占着 :99/rfbport，新会话起不来。
-    web_down
-
-    if start_web_edge "${kiosk_user}"; then
-        start_websockify
-        return $?
-    fi
-    log_msg "web_up failed to start session."
-    web_down
-    return 1
+    log_msg "Stopping FnDesk control console."
+    stop_pid_file "${CONTROL_PID_FILE}"
 }
 
 start_process() {
     if status_process; then
-        log_msg "FnDesk Web service is already running."
+        log_msg "FnDesk control console is already running."
         return 0
     fi
 
-    stop_process
-
-    local missing
-    missing="$(missing_deps | paste -sd ' ' -)"
-    if [ -n "${missing}" ]; then
-        start_fallback "${missing}"
-        return $?
-    fi
-
-    local kiosk_user
-    kiosk_user="$(resolve_kiosk_user)"
-    if [ -z "${kiosk_user}" ]; then
-        start_fallback "regular-login-user"
-        return $?
-    fi
-
-    # 只常驻 websockify（守 18733）。真正的 Xvnc+Edge 会话由前端连接时按需
-    # 通过 web-up 拉起，空闲时 web-down 回收，从而避免“打开后一直占后台”。
-    if start_websockify; then
-        log_msg "FnDesk web frontend ready on ${PORT}; session starts on demand."
-        return 0
-    fi
-
-    log_msg "websockify failed to start; showing fallback page instead."
-    stop_process
-    start_fallback "web-edge-start-failed"
+    mkdir -p "${PKG_VAR}"
+    log_msg "Starting FnDesk control console on 0.0.0.0:${PORT}."
+    TRIM_APPDEST="${APP_DEST}" TRIM_PKGVAR="${PKG_VAR}" TRIM_SERVICE_PORT="${PORT}" \
+        nohup python3 "${APP_DEST}/server/fndesk-server.py" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${CONTROL_PID_FILE}"
+    sleep 1
+    control_pid_alive "${CONTROL_PID_FILE}"
 }
 
 case "${1:-}" in
@@ -398,7 +92,5 @@ start) start_process ;;
 stop) stop_process ;;
 status) status_process ;;
 restart) stop_process; start_process ;;
-web-up) web_up ;;
-web-down) web_down ;;
 *) exit 1 ;;
 esac

@@ -16,6 +16,7 @@ if [[ -z "${KIOSK_USER:-}" ]]; then
     exit 1
   fi
 fi
+
 KIOSK_OUTPUT="${KIOSK_OUTPUT:-}"
 FNDESK_INSTALLED_PACKAGES=()
 FNDESK_CREATED_EDGE_KEY=0
@@ -26,16 +27,13 @@ BOOTSTRAP_PACKAGES=(
   curl
   gnupg
   locales
-  openssl
 )
 
-PACKAGES=(
+LOCAL_PACKAGES=(
   cage
-  microsoft-edge-stable
   seatd
   wlr-randr
   xwayland
-  mesa-utils
   fonts-noto-cjk
   adwaita-icon-theme
   fcitx5
@@ -45,29 +43,6 @@ PACKAGES=(
   fcitx5-frontend-qt5
   dbus
   dbus-user-session
-)
-
-WEB_PACKAGES=(
-  tigervnc-common
-  tigervnc-standalone-server
-  tigervnc-tools
-  novnc
-  websockify
-  x11-utils
-  xdotool
-  xclip
-)
-
-MESA_BACKPORT_PACKAGES=(
-  libgl1-mesa-dri
-  libegl-mesa0
-  libgbm1
-  libglx-mesa0
-  libglapi-mesa
-  mesa-vdpau-drivers
-  mesa-va-drivers
-  mesa-vulkan-drivers
-  mesa-utils
 )
 
 package_installed() {
@@ -87,7 +62,7 @@ install_bundled_edge() {
   local edge_deb
 
   if package_installed microsoft-edge-stable; then
-    echo "[2/9] microsoft-edge-stable is already installed; skipping bundled Edge."
+    echo "[2/8] microsoft-edge-stable is already installed; keeping existing installation."
     return 0
   fi
 
@@ -100,11 +75,11 @@ install_bundled_edge() {
     return 1
   fi
 
-  echo "[2/9] Installing bundled Microsoft Edge: ${edge_deb}"
+  echo "[2/8] Installing bundled Microsoft Edge: ${edge_deb}"
   warn_dpkg_state_for_apt
   apt-get install -y "${edge_deb}" || true
   if ! package_installed microsoft-edge-stable; then
-    echo "[2/9] bundled Microsoft Edge install did not finish." >&2
+    echo "[2/8] bundled Microsoft Edge install did not finish." >&2
     return 1
   fi
   FNDESK_INSTALLED_PACKAGES+=("microsoft-edge-stable")
@@ -118,12 +93,12 @@ setup_edge_repository() {
     key_tmp="$(mktemp)"
     if ! curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o "${key_tmp}"; then
       rm -f "${key_tmp}"
-      echo "[2/9] Failed to download Microsoft Edge signing key. Check network access to packages.microsoft.com, or bundle microsoft-edge-stable_*.deb in app/debs/." >&2
+      echo "[2/8] Failed to download Microsoft Edge signing key. Check network access to packages.microsoft.com, or bundle microsoft-edge-stable_*.deb in app/debs/." >&2
       return 1
     fi
     if ! gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg "${key_tmp}"; then
       rm -f "${key_tmp}"
-      echo "[2/9] Failed to import Microsoft Edge signing key." >&2
+      echo "[2/8] Failed to import Microsoft Edge signing key." >&2
       return 1
     fi
     rm -f "${key_tmp}"
@@ -174,43 +149,34 @@ install_missing_packages() {
   FNDESK_INSTALLED_PACKAGES+=("${missing[@]}")
 }
 
-echo "[1/9] Checking bootstrap packages: ${BOOTSTRAP_PACKAGES[*]}"
-install_missing_packages "[1/9] Bootstrap packages" "${BOOTSTRAP_PACKAGES[@]}"
+echo "[1/8] Checking bootstrap packages: ${BOOTSTRAP_PACKAGES[*]}"
+install_missing_packages "[1/8] Bootstrap packages" "${BOOTSTRAP_PACKAGES[@]}"
 
-echo "[2/9] Checking Microsoft Edge"
+echo "[2/8] Checking Microsoft Edge"
 if package_installed microsoft-edge-stable; then
-  echo "[2/9] microsoft-edge-stable is already installed."
+  echo "[2/8] microsoft-edge-stable is already installed."
 elif install_bundled_edge; then
-  echo "[2/9] Bundled Microsoft Edge installed."
+  echo "[2/8] Bundled Microsoft Edge installed."
 else
-  echo "[2/9] Bundled Microsoft Edge not found; using Microsoft apt repository."
+  echo "[2/8] Bundled Microsoft Edge not found; using Microsoft apt repository."
   setup_edge_repository
+  install_missing_packages "[2/8] Microsoft Edge" microsoft-edge-stable
 fi
 
-echo "[3/9] Checking kiosk packages: ${PACKAGES[*]}"
-install_missing_packages "[3/9] Kiosk packages" "${PACKAGES[@]}"
-echo "[3/9] Checking Web Edge packages: ${WEB_PACKAGES[*]}"
-if ! install_missing_packages "[3/9] Web Edge packages" "${WEB_PACKAGES[@]}"; then
-  echo "[3/9] Web Edge packages are not fully installed. FnDesk will install, but Web Edge needs: ${WEB_PACKAGES[*]}." >&2
-fi
-if apt-cache policy libegl-mesa0 | grep -q 'bookworm-backports'; then
-  echo "[3/9] Checking Mesa userspace packages"
-  install_missing_packages "[3/9] Mesa userspace packages" "${MESA_BACKPORT_PACKAGES[@]}"
-else
-  echo "[3/9] bookworm-backports not available; skipping Mesa backports upgrade"
-fi
+echo "[3/8] Checking local display packages: ${LOCAL_PACKAGES[*]}"
+install_missing_packages "[3/8] Local display packages" "${LOCAL_PACKAGES[@]}"
 
-echo "[4/9] Ensuring kiosk user exists and can access graphics devices"
+echo "[4/8] Ensuring kiosk user exists and can access graphics devices"
 id "${KIOSK_USER}" >/dev/null 2>&1
 usermod -aG video,render "${KIOSK_USER}"
 
-echo "[4/9] Ensuring zh_CN.UTF-8 locale is available"
+echo "[4/8] Ensuring zh_CN.UTF-8 locale is available"
 if ! locale -a | grep -qi '^zh_CN\.utf8$'; then
   sed -i 's/^# *\(zh_CN.UTF-8 UTF-8\)/\1/' /etc/locale.gen
   locale-gen zh_CN.UTF-8
 fi
 
-echo "[5/9] Configuring fcitx5 Chinese input for ${KIOSK_USER}"
+echo "[5/8] Configuring fcitx5 Chinese input for ${KIOSK_USER}"
 KIOSK_HOME="$(getent passwd "${KIOSK_USER}" | cut -d: -f6)"
 KIOSK_GROUP="$(id -gn "${KIOSK_USER}")"
 install -d -o "${KIOSK_USER}" -g "${KIOSK_GROUP}" -m 0700 "${KIOSK_HOME}/.config/fcitx5"
@@ -233,71 +199,55 @@ Layout=
 EOF
 chown "${KIOSK_USER}:${KIOSK_GROUP}" "${KIOSK_HOME}/.config/fcitx5/profile"
 
-echo "[5/9] Adding FnDesk recovery alias for ${KIOSK_USER}"
+echo "[5/8] Adding FnDesk recovery aliases for ${KIOSK_USER}"
 sed -i '/^alias fnre=/d' "${KIOSK_HOME}/.bashrc" 2>/dev/null || true
-if ! grep -q 'alias fndesk-restart=' "${KIOSK_HOME}/.bashrc" 2>/dev/null; then
-  cat >>"${KIOSK_HOME}/.bashrc" <<'EOF'
+sed -i '/^alias fndesk-restart=/d' "${KIOSK_HOME}/.bashrc" 2>/dev/null || true
+sed -i '/^alias fndesk-start=/d' "${KIOSK_HOME}/.bashrc" 2>/dev/null || true
+sed -i '/^alias fndesk-stop=/d' "${KIOSK_HOME}/.bashrc" 2>/dev/null || true
+cat >>"${KIOSK_HOME}/.bashrc" <<'EOF'
 
-# Restart FnDesk local display and switch back to tty1
-alias fndesk-restart='sudo systemctl restart web-kiosk.service && sudo chvt 1'
+# FnDesk local display controls
+alias fndesk-start='sudo systemctl start fndesk-local.service && sudo chvt 1'
+alias fndesk-stop='sudo systemctl stop fndesk-local.service'
+alias fndesk-restart='sudo systemctl restart fndesk-local.service && sudo chvt 1'
 EOF
-  chown "${KIOSK_USER}:${KIOSK_GROUP}" "${KIOSK_HOME}/.bashrc"
-fi
+chown "${KIOSK_USER}:${KIOSK_GROUP}" "${KIOSK_HOME}/.bashrc"
 
-echo "[6/9] Enabling seatd"
+echo "[6/8] Enabling seatd and reserving tty1"
 systemctl enable --now seatd.service
-
-echo "[7/9] Reserving tty1 for kiosk and enabling tty2-tty6 terminals"
 systemctl disable --now getty@tty1.service 2>/dev/null || true
 for tty in tty2 tty3 tty4 tty5 tty6; do
   systemctl enable --now "getty@${tty}.service" >/dev/null 2>&1 || true
 done
 
-echo "[8/9] Writing kiosk configuration, launchers, and power policy"
-install -d -m 0755 /etc/web-kiosk
-TLS_CERT=/etc/web-kiosk/fndesk-cert.pem
-TLS_KEY=/etc/web-kiosk/fndesk-key.pem
-if [[ ! -s "${TLS_CERT}" || ! -s "${TLS_KEY}" ]]; then
-  echo "[8/9] Generating self-signed TLS cert for Web Edge clipboard sync"
-  HOSTNAME_VALUE="$(hostname 2>/dev/null || echo fndesk)"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "${TLS_KEY}" \
-    -out "${TLS_CERT}" \
-    -days 3650 \
-    -subj "/CN=FnDesk" \
-    -addext "subjectAltName=DNS:fndesk,DNS:localhost,DNS:${HOSTNAME_VALUE},IP:127.0.0.1" \
-    >/dev/null 2>&1 || true
-fi
-chmod 0600 "${TLS_KEY}" 2>/dev/null || true
-chmod 0644 "${TLS_CERT}" 2>/dev/null || true
-
-cat >/etc/default/web-kiosk <<EOF
+echo "[7/8] Writing FnDesk local display configuration"
+install -d -m 0755 /etc/fndesk
+cat >/etc/default/fndesk <<EOF
 KIOSK_USER=${KIOSK_USER}
 KIOSK_OUTPUT=${KIOSK_OUTPUT}
-FNDESK_INSTALLED_PACKAGES="${FNDESK_INSTALLED_PACKAGES[*]}"
+FNDESK_INSTALLED_PACKAGES='${FNDESK_INSTALLED_PACKAGES[*]}'
 FNDESK_CREATED_EDGE_KEY=${FNDESK_CREATED_EDGE_KEY}
 FNDESK_CREATED_EDGE_REPO=${FNDESK_CREATED_EDGE_REPO}
-FNDESK_TLS_CERT=${TLS_CERT}
-FNDESK_TLS_KEY=${TLS_KEY}
 EOF
 
 install -d -m 0755 /etc/opt/edge/policies/managed
-cat >/etc/opt/edge/policies/managed/web-kiosk.json <<'EOF'
+cat >/etc/opt/edge/policies/managed/fndesk.json <<'EOF'
 {
   "ApplicationLocaleValue": "zh-CN",
   "FavoritesBarEnabled": true,
   "HideFirstRunExperience": true
 }
 EOF
-chmod 0644 /etc/opt/edge/policies/managed/web-kiosk.json
+chmod 0644 /etc/opt/edge/policies/managed/fndesk.json
+rm -f /etc/opt/edge/policies/managed/web-kiosk.json 2>/dev/null || true
 
-cat >/usr/local/bin/web-kiosk-launch <<'EOF'
+cat >/usr/local/bin/fndesk-local-launch <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /etc/default/web-kiosk
+source /etc/default/fndesk
 
-export XDG_RUNTIME_DIR="/run/web-kiosk"
+export XDG_RUNTIME_DIR="/run/fndesk-local"
 export LIBSEAT_BACKEND=seatd
 export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_NO_HARDWARE_CURSORS=1
@@ -314,14 +264,6 @@ export XCURSOR_SIZE=24
 
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 700 "${XDG_RUNTIME_DIR}"
-
-# 用户主动“关闭本地 Edge”后会留下抑制标记。即使 udev 因 DRM change（cage 释放
-# 显示器本身就会触发）再次 restart 本服务，也直接进入空闲，避免被自动拉起。
-# “启动/重启本地 Edge”会清除该标记。
-if [[ -f /etc/web-kiosk/local-disabled ]]; then
-  echo "FnDesk local display: disabled by user; staying idle." >&2
-  exit 75
-fi
 
 if [[ -n "${KIOSK_OUTPUT:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
   wlr-randr --output "${KIOSK_OUTPUT}" --on || true
@@ -357,15 +299,15 @@ if ! has_connected_display; then
   exit 75
 fi
 
-exec dbus-run-session -- cage -s -- /usr/local/bin/web-kiosk-browser
+exec dbus-run-session -- cage -s -- /usr/local/bin/fndesk-local-browser
 EOF
-chmod 0755 /usr/local/bin/web-kiosk-launch
+chmod 0755 /usr/local/bin/fndesk-local-launch
 
-cat >/usr/local/bin/web-kiosk-browser <<'EOF'
+cat >/usr/local/bin/fndesk-local-browser <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /etc/default/web-kiosk
+source /etc/default/fndesk
 
 export GTK_IM_MODULE=fcitx
 export QT_IM_MODULE=fcitx
@@ -404,26 +346,24 @@ edge_args=(
 
 exec microsoft-edge-stable "${edge_args[@]}"
 EOF
-chmod 0755 /usr/local/bin/web-kiosk-browser
+chmod 0755 /usr/local/bin/fndesk-local-browser
 
-cat >/usr/local/bin/web-kiosk-display-power <<'EOF'
+cat >/usr/local/bin/fndesk-display-power <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Disable Linux virtual console blanking for tty-based deployments at boot.
 if [[ -w /sys/module/kernel/parameters/consoleblank ]]; then
   printf '0' >/sys/module/kernel/parameters/consoleblank || true
 fi
 
-# Also ask the virtual console to disable blanking and powerdown.
 if command -v setterm >/dev/null 2>&1 && [[ -w /dev/tty1 ]]; then
   setterm --blank 0 --powerdown 0 --powersave off </dev/tty1 >/dev/tty1 2>/dev/null || true
 fi
 EOF
-chmod 0755 /usr/local/bin/web-kiosk-display-power
+chmod 0755 /usr/local/bin/fndesk-display-power
 
 install -d -m 0755 /etc/systemd/logind.conf.d /etc/systemd/sleep.conf.d
-cat >/etc/systemd/logind.conf.d/web-kiosk.conf <<'EOF'
+cat >/etc/systemd/logind.conf.d/fndesk.conf <<'EOF'
 [Login]
 IdleAction=ignore
 HandleLidSwitch=ignore
@@ -432,7 +372,7 @@ HandleLidSwitchDocked=ignore
 HandlePowerKey=ignore
 EOF
 
-cat >/etc/systemd/sleep.conf.d/web-kiosk.conf <<'EOF'
+cat >/etc/systemd/sleep.conf.d/fndesk.conf <<'EOF'
 [Sleep]
 AllowSuspend=no
 AllowHibernation=no
@@ -440,24 +380,23 @@ AllowSuspendThenHibernate=no
 AllowHybridSleep=no
 EOF
 
-echo "[9/9] Writing systemd service and enabling kiosk"
-cat >/etc/systemd/system/web-kiosk.service <<EOF
+echo "[8/8] Writing systemd units"
+cat >/etc/systemd/system/fndesk-local.service <<EOF
 [Unit]
-Description=Minimal Edge Web Kiosk
+Description=FnDesk Local Microsoft Edge
 After=systemd-user-sessions.service network-online.target seatd.service
 Wants=network-online.target seatd.service
 Conflicts=getty@tty1.service
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/default/web-kiosk
+EnvironmentFile=/etc/default/fndesk
 User=root
-ExecStartPre=/usr/bin/install -d -o ${KIOSK_USER} -g $(id -gn ${KIOSK_USER}) -m 0700 /run/web-kiosk
+ExecStartPre=/usr/bin/install -d -o ${KIOSK_USER} -g $(id -gn ${KIOSK_USER}) -m 0700 /run/fndesk-local
 ExecStartPre=-/usr/bin/chvt 1
-ExecStart=/usr/sbin/runuser -u ${KIOSK_USER} -- /usr/local/bin/web-kiosk-launch
-ExecStopPost=/usr/bin/rm -rf /run/web-kiosk
-Restart=always
-SuccessExitStatus=75
+ExecStart=/usr/sbin/runuser -u ${KIOSK_USER} -- /usr/local/bin/fndesk-local-launch
+ExecStopPost=/usr/bin/rm -rf /run/fndesk-local
+Restart=on-failure
 RestartPreventExitStatus=75
 RestartSec=2
 TTYPath=/dev/tty1
@@ -471,35 +410,45 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-cat >/etc/systemd/system/web-kiosk-display-power.service <<'EOF'
+cat >/etc/systemd/system/fndesk-display-power.service <<'EOF'
 [Unit]
-Description=Disable Web Kiosk Sleep and Screen Blanking
-Before=web-kiosk.service
+Description=FnDesk Display Power Policy
+Before=fndesk-local.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/web-kiosk-display-power
+ExecStart=/usr/local/bin/fndesk-display-power
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-cat >/etc/udev/rules.d/99-web-kiosk-drm.rules <<'EOF'
-# Start or restart local display service when a display is connected/disconnected.
-ACTION=="change", SUBSYSTEM=="drm", RUN+="/usr/bin/systemctl restart web-kiosk.service"
-EOF
+# Remove old Web Edge/noVNC service names and hotplug auto-start behavior.
+systemctl disable --now web-kiosk.service 2>/dev/null || true
+systemctl disable --now web-kiosk-display-power.service 2>/dev/null || true
+rm -f /etc/systemd/system/web-kiosk.service 2>/dev/null || true
+rm -f /etc/systemd/system/web-kiosk-display-power.service 2>/dev/null || true
+rm -f /usr/local/bin/web-kiosk-launch 2>/dev/null || true
+rm -f /usr/local/bin/web-kiosk-browser 2>/dev/null || true
+rm -f /usr/local/bin/web-kiosk-display-power 2>/dev/null || true
+rm -f /etc/default/web-kiosk 2>/dev/null || true
+rm -rf /etc/web-kiosk 2>/dev/null || true
+rm -f /etc/systemd/logind.conf.d/web-kiosk.conf 2>/dev/null || true
+rm -f /etc/systemd/sleep.conf.d/web-kiosk.conf 2>/dev/null || true
+rm -f /etc/udev/rules.d/99-web-kiosk-drm.rules 2>/dev/null || true
 udevadm control --reload-rules 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
 systemctl restart systemd-logind.service 2>/dev/null || true
-systemctl enable --now web-kiosk-display-power.service
-systemctl enable web-kiosk.service
+systemctl enable --now fndesk-display-power.service
+systemctl disable fndesk-local.service 2>/dev/null || true
+systemctl stop fndesk-local.service 2>/dev/null || true
 
 echo
 echo "Install completed."
-echo "Local Edge starts without a fixed default page."
+echo "FnDesk control console manages the local-display Edge."
+echo "Local Edge does not start automatically. Start it from the Web console or run: systemctl start fndesk-local.service"
 echo "Chinese input uses fcitx5 pinyin. Toggle with Ctrl+Space if needed."
-echo "Start service with: systemctl start web-kiosk.service"
-echo "Check logs with: journalctl -u web-kiosk.service -b"
+echo "Check local logs with: journalctl -u fndesk-local.service -b"

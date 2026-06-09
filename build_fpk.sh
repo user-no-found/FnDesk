@@ -18,7 +18,9 @@ VERSION="$(awk '/^version[[:space:]]*=/{print $3; exit}' "${SCRIPT_DIR}/manifest
 echo "Version: ${VERSION}"
 
 chmod 755 "${SCRIPT_DIR}/cmd/main" "${SCRIPT_DIR}"/cmd/*_init "${SCRIPT_DIR}"/cmd/*_callback 2>/dev/null || true
-chmod 755 "${SCRIPT_DIR}/app/install-kiosk.sh" "${SCRIPT_DIR}/app/window-sync.sh"
+chmod 755 "${SCRIPT_DIR}/app/install-kiosk.sh"
+find "${SCRIPT_DIR}/app" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+find "${SCRIPT_DIR}/app" -type f -name '*.pyc' -delete 2>/dev/null || true
 
 rm -f "${APP_TGZ}" "${OUTPUT}"
 tar -czf "${APP_TGZ}" -C "${SCRIPT_DIR}/app" .

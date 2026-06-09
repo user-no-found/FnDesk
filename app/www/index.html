@@ -3,95 +3,331 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FnDesk</title>
+  <title>FnDesk 控制台</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f4f7fb; color: #17202a; }
-    .shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
-    .bar { height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px; background: #fff; border-bottom: 1px solid #d7e0ea; }
-    .brand { font-size: 18px; font-weight: 700; color: #075985; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-    button { height: 34px; border: 1px solid #b7c4d1; border-radius: 6px; background: #fff; color: #17202a; padding: 0 12px; font: inherit; cursor: pointer; }
-    button.primary { background: #0ea5e9; border-color: #0284c7; color: #fff; }
-    main { width: min(860px, calc(100vw - 32px)); margin: 44px auto; }
-    .panel { background: #fff; border: 1px solid #d7e0ea; border-radius: 8px; padding: 22px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }
-    h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.25; }
-    p { margin: 8px 0; color: #465b6b; line-height: 1.65; }
-    code { background: #eef3f8; border: 1px solid #d7e0ea; border-radius: 5px; padding: 2px 6px; color: #0f172a; }
-    pre { overflow: auto; background: #101827; color: #e5edf6; border-radius: 8px; padding: 14px; line-height: 1.55; }
-    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
-    .item { border: 1px solid #d7e0ea; border-radius: 8px; padding: 14px; }
-    .label { color: #64748b; font-size: 13px; margin-bottom: 4px; }
-    .value { font-weight: 650; word-break: break-word; }
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --line: #d8e0e8;
+      --line-strong: #b8c5d2;
+      --text: #111827;
+      --muted: #667085;
+      --blue: #0b6bcb;
+      --green: #13795b;
+      --green-bg: #e7f6ef;
+      --red: #b42318;
+      --red-bg: #fde8e7;
+      --amber: #9a6700;
+      --amber-bg: #fff4d7;
+      --neutral-bg: #edf1f5;
+      --shadow: 0 12px 30px rgba(17, 24, 39, 0.08);
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button { font: inherit; }
+    button {
+      min-height: 38px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 14px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: #f9fbfc; border-color: #8fa1b3; }
+    button:disabled { color: #9aa6b2; background: #eef2f5; cursor: not-allowed; }
+    button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    button.primary:hover:not(:disabled) { background: #0759ad; }
+    button.danger { border-color: #d92d20; color: var(--red); }
+    button.danger:hover:not(:disabled) { background: #fff3f2; }
+    button.ghost { background: transparent; }
+    .app {
+      height: 100vh;
+      height: 100dvh;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr);
+      overflow: hidden;
+    }
+    main {
+      width: min(980px, calc(100vw - 28px));
+      height: 100%;
+      min-height: 0;
+      margin: 0 auto;
+      padding: clamp(8px, 2vh, 18px) 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: clamp(8px, 1.4vh, 12px);
+      overflow: hidden;
+    }
+    .card { min-height: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+    .control-card { display: grid; grid-template-rows: auto auto; }
+    .log-card { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+    .section-head {
+      min-height: clamp(44px, 8vh, 52px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: clamp(10px, 1.7vh, 14px) 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .section-head h2 { margin: 0; font-size: 16px; line-height: 1.2; }
+    .section-body { min-height: 0; padding: clamp(10px, 2vh, 18px); }
+    .control-body { min-height: 0; }
+    .log-body { display: grid; min-height: 0; overflow: hidden; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      border-radius: 999px;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 650;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .badge.ok { color: var(--green); background: var(--green-bg); border-color: #a8dec9; }
+    .badge.warn { color: var(--amber); background: var(--amber-bg); border-color: #efd17b; }
+    .badge.bad { color: var(--red); background: var(--red-bg); border-color: #f5aaa4; }
+    .badge.neutral { color: #405164; background: var(--neutral-bg); border-color: #cbd5df; }
+    .control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
+    .status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: clamp(10px, 1.8vh, 14px); }
+    .field { min-height: clamp(50px, 8vh, 64px); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; background: #fbfcfd; }
+    .field .name { color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+    .field .data { font-weight: 650; word-break: break-word; }
+    .diagnostic-actions { display: grid; align-items: center; gap: 8px; grid-template-columns: repeat(4, max-content); justify-content: flex-end; }
+    pre {
+      min-height: 0;
+      height: 100%;
+      overflow: auto;
+      margin: 0;
+      padding: 14px;
+      background: #111827;
+      color: #dbeafe;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      max-width: min(720px, calc(100vw - 28px));
+      min-height: 42px;
+      display: none;
+      align-items: center;
+      border-radius: 8px;
+      padding: 10px 14px;
+      background: #17202a;
+      color: #fff;
+      box-shadow: 0 14px 34px rgba(17, 24, 39, 0.24);
+      z-index: 10;
+    }
+    .toast.show { display: flex; }
     @media (max-width: 720px) {
-      .bar { height: auto; min-height: 56px; align-items: flex-start; flex-direction: column; padding: 12px; }
-      .actions { justify-content: flex-start; }
-      main { margin: 22px auto; }
-      .grid { grid-template-columns: 1fr; }
+      main { width: min(100vw - 16px, 980px); padding: 8px 0; }
+      .control-grid, .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-head { padding: 10px 12px; }
+      .section-body { padding: 10px 12px; }
+      .log-card .section-head { align-items: flex-start; flex-direction: column; }
+      .diagnostic-actions { justify-content: stretch; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      button { min-height: 34px; padding: 0 10px; }
+      .control-grid button, .diagnostic-actions button { width: 100%; }
+    }
+    @media (max-height: 620px) {
+      button { min-height: 34px; }
+      .section-head { min-height: 42px; }
+      .field { min-height: 46px; }
+      pre { padding: 10px; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header class="bar">
-      <div class="brand">FnDesk</div>
-      <div class="actions">
-        <button class="primary" id="retry" type="button">重新检测</button>
-        <button id="restart" type="button">重启本地 Edge</button>
-        <button id="start" type="button">启动本地 Edge</button>
-        <button id="stop" type="button">停止本地 Edge</button>
-      </div>
-    </header>
+  <div class="app">
     <main>
-      <section class="panel">
-        <h1>Web Edge 还没有启动</h1>
-        <p>FnDesk Web 端需要一个独立的虚拟显示器来运行真正的 Microsoft Edge。这里不会安装 GNOME、KDE 或其他本地桌面环境，最小依赖是 <code>tigervnc-standalone-server</code>、<code>tigervnc-common</code>、<code>novnc</code>、<code>websockify</code>。</p>
-        <p>当前缺少的组件：</p>
-        <pre id="missing">检测中...</pre>
-        <p>安装这些组件后，重启 FnDesk 应用服务，应用中心再次打开就是 noVNC 中的真实 Edge。</p>
-        <div class="grid">
-          <div class="item">
-            <div class="label">本地显示器 Edge</div>
-            <div class="value" id="local">检测中...</div>
+      <section class="card control-card">
+        <div class="section-head">
+          <h2>本地控制</h2>
+          <div class="diagnostic-actions">
+            <span class="badge neutral" id="service-badge">检测中</span>
+            <button id="refresh" type="button">刷新</button>
           </div>
-          <div class="item">
-            <div class="label">显示器电源策略</div>
-            <div class="value" id="power">检测中...</div>
+        </div>
+        <div class="section-body control-body">
+          <div class="control-grid">
+            <button class="primary" id="start" type="button">启动</button>
+            <button id="stop" type="button">关闭</button>
+            <button id="restart" type="button">重启</button>
+            <button id="tty1" type="button">切到 tty1</button>
           </div>
+          <div class="status-grid">
+            <div class="field">
+              <div class="name">服务</div>
+              <div class="data" id="local-service">-</div>
+            </div>
+            <div class="field">
+              <div class="name">失败状态</div>
+              <div class="data" id="failed-state">-</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card log-card">
+        <div class="section-head">
+          <h2>诊断</h2>
+          <div class="diagnostic-actions">
+            <button class="ghost" id="logs-local" type="button">本地服务日志</button>
+            <button class="ghost" id="logs-control" type="button">控制台日志</button>
+            <button class="ghost" id="reset-failed" type="button">重置失败</button>
+            <button class="danger" id="kill-edge" type="button">强制结束本地服务</button>
+          </div>
+        </div>
+        <div class="section-body log-body">
+          <pre id="logs">加载中...</pre>
         </div>
       </section>
     </main>
   </div>
+  <div class="toast" id="toast"></div>
+
   <script>
-    const missing = document.getElementById('missing');
-    const local = document.getElementById('local');
-    const power = document.getElementById('power');
+    const els = {
+      serviceBadge: document.getElementById('service-badge'),
+      localService: document.getElementById('local-service'),
+      failedState: document.getElementById('failed-state'),
+      logs: document.getElementById('logs'),
+      toast: document.getElementById('toast'),
+      start: document.getElementById('start'),
+      stop: document.getElementById('stop'),
+      restart: document.getElementById('restart'),
+      tty1: document.getElementById('tty1'),
+      resetFailed: document.getElementById('reset-failed'),
+      killEdge: document.getElementById('kill-edge'),
+    };
+
+    let logMode = 'local';
+    let toastTimer = 0;
+
+    function badgeClass(kind) {
+      return `badge ${kind}`;
+    }
+
+    function showToast(text, kind) {
+      clearTimeout(toastTimer);
+      els.toast.textContent = text;
+      els.toast.className = `toast show ${kind || ''}`;
+      toastTimer = setTimeout(() => { els.toast.className = 'toast'; }, 3200);
+    }
+
+    function serviceText(value) {
+      const map = {
+        active: '运行中',
+        inactive: '已停止',
+        failed: '失败',
+        activating: '启动中',
+        deactivating: '停止中',
+        unknown: '未知',
+      };
+      return map[value] || value || '未知';
+    }
+
+    function serviceKind(value, failed) {
+      if (failed === 'failed') return 'bad';
+      if (value === 'active') return 'ok';
+      if (value === 'failed') return 'bad';
+      if (value === 'inactive') return 'neutral';
+      return 'warn';
+    }
+
+    async function api(path, options) {
+      const res = await fetch(path, Object.assign({ cache: 'no-store' }, options || {}));
+      const type = res.headers.get('content-type') || '';
+      if (type.includes('application/json')) return res.json();
+      return res.text();
+    }
+
+    async function post(path) {
+      const data = await api(path, { method: 'POST' });
+      if (data && data.message) showToast(data.message, data.ok ? 'ok' : 'bad');
+      await refresh();
+      await loadLogs(logMode);
+    }
+
+    function render(status) {
+      const local = status.services.local;
+      const failed = local.failed || '';
+      const kind = serviceKind(local.active, failed);
+      const label = failed === 'failed' ? '失败' : serviceText(local.active);
+
+      els.serviceBadge.textContent = label;
+      els.serviceBadge.className = badgeClass(kind);
+      els.localService.textContent = `${local.active || 'unknown'} / ${local.enabled || 'unknown'}`;
+      els.failedState.textContent = failed || 'unknown';
+
+      const active = local.active === 'active';
+      els.start.disabled = active;
+      els.stop.disabled = !active && failed !== 'failed';
+      els.restart.disabled = false;
+      els.tty1.disabled = false;
+      els.resetFailed.disabled = failed !== 'failed';
+    }
 
     async function refresh() {
       try {
-        const res = await fetch('/api/status', { cache: 'no-store' });
-        const data = await res.json();
-        const deps = data.missingDeps || [];
-        missing.textContent = deps.length ? deps.join('\n') : '依赖已齐全，请重启 FnDesk 应用服务。';
-        if (deps.includes('web-edge-start-failed')) {
-          missing.textContent = 'Web Edge 启动失败。请查看 /usr/local/apps/@appdata/fndesk/fndesk.log。';
-        }
-        local.textContent = data.webKiosk || 'unknown';
-        power.textContent = data.displayPower || 'unknown';
+        const data = await api('/api/status');
+        if (data.ok) render(data.data);
       } catch (err) {
-        missing.textContent = String(err);
+        els.serviceBadge.textContent = '连接失败';
+        els.serviceBadge.className = badgeClass('bad');
+        showToast(String(err), 'bad');
       }
     }
 
-    for (const [id, path] of [['restart', '/api/service/restart'], ['start', '/api/service/start'], ['stop', '/api/service/stop']]) {
-      document.getElementById(id).addEventListener('click', async () => {
-        await fetch(path, { method: 'POST' });
-        await refresh();
-      });
+    async function loadLogs(mode) {
+      logMode = mode;
+      try {
+        const unit = mode === 'control' ? 'control' : 'local';
+        els.logs.textContent = await api(`/api/logs?unit=${unit}&lines=180`);
+        if (!els.logs.textContent.trim()) els.logs.textContent = '暂无日志';
+      } catch (err) {
+        els.logs.textContent = String(err);
+      }
     }
 
-    document.getElementById('retry').addEventListener('click', refresh);
+    document.getElementById('refresh').addEventListener('click', async () => {
+      await refresh();
+      await loadLogs(logMode);
+    });
+    els.start.addEventListener('click', () => post('/api/local/start'));
+    els.stop.addEventListener('click', () => post('/api/local/stop'));
+    els.restart.addEventListener('click', () => post('/api/local/restart'));
+    els.tty1.addEventListener('click', () => post('/api/local/tty1'));
+    els.resetFailed.addEventListener('click', () => post('/api/local/reset-failed'));
+    els.killEdge.addEventListener('click', () => {
+      if (window.confirm('强制结束 FnDesk 本地服务中的进程？')) post('/api/local/kill-edge');
+    });
+    document.getElementById('logs-local').addEventListener('click', () => loadLogs('local'));
+    document.getElementById('logs-control').addEventListener('click', () => loadLogs('control'));
+
     refresh();
+    loadLogs('local');
+    setInterval(refresh, 8000);
   </script>
 </body>
 </html>

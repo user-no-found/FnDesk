@@ -1,19 +1,17 @@
-# FnDesk · fnOS Edge 桌面
+# FnDesk · fnOS 本地 Edge 控制台
 
-FnDesk 是为 fnOS 打包的 Microsoft Edge 桌面应用。它不安装 GNOME、KDE、XFCE 等完整桌面环境，只使用最小图形栈提供本地显示器 Edge 和 Web Edge 两种入口。
+FnDesk 是为 fnOS 打包的 Microsoft Edge 本地显示器控制工具。应用中心打开的是 Web 控制台；真实 Microsoft Edge 只在本地显示器 tty1 上运行，并且只在用户从控制台启动时运行。
+
+它不安装 GNOME、KDE、XFCE 等完整桌面环境，只使用最小图形栈在本地显示器上启动 Edge。
 
 ## 它能做什么
 
-- **本地显示器打开 Edge**：在 tty1 上启动真实 Microsoft Edge。
-- **Web 中打开 Edge**：通过 TigerVNC、noVNC 和 websockify 启动一个独立的真实 Edge 会话。
-- **本地和 Web 相互独立**：两边不是同一个画面，可以分别使用。
-- **不固定默认网页**：Edge 正常启动，用户自行输入地址或使用浏览器历史记录。
+- **Web 控制台**：在应用中心打开 FnDesk 后，可以启动、关闭、重启本地 Edge，并查看日志。
+- **本地显示器 Edge**：在 tty1 上启动真实 Microsoft Edge，不在 Web 端运行虚拟浏览器。
+- **手动启停**：本地 Edge 默认不自动启动；从控制台点击启动、关闭或重启。
+- **显示器检测**：启动前检测 DRM 显示器连接状态，无显示器时启动失败并在日志里说明原因。
 - **中文体验**：安装中文字体，配置 Edge 中文界面和 fcitx5 拼音输入。
-- **显示器热插拔**：本地未接显示器时服务保持空闲，接入显示器后自动恢复。
-- **Web 精确适配窗口**：noVNC 把虚拟屏尺寸实时设成应用窗口可视区，并同步 Edge 窗口大小，不留黑边也不超出。
-- **Web 按需启停，不常驻后台**：只有 websockify 常驻监听端口，真正耗资源的 Xvnc 和 Edge 在有人访问时按需启动；关闭窗口、切走或空闲超时后自动回收，再次打开自动恢复。
-- **Web 端内置控制按钮**：noVNC 画面右下角提供菜单，可启动、重启、关闭本地显示器 Edge，也可以一键关闭 Web 后台。
-- **卸载可选清理**：卸载时可以选择是否删除 Web Edge 用户数据，以及是否卸载 FnDesk 依赖包。
+- **保守卸载**：卸载不会删除本地 Edge 用户数据；依赖卸载只处理 FnDesk 安装时记录的包，并排除 Mesa/显卡驱动相关包。
 - **内置 Edge 安装包**：在微软 apt 源不可用时，也可以使用包内自带的 Edge `.deb` 安装。
 
 ## 安装使用
@@ -22,43 +20,54 @@ FnDesk 是为 fnOS 打包的 Microsoft Edge 桌面应用。它不安装 GNOME、
 
 安装完成后：
 
-- 应用中心打开 FnDesk，会进入 Web Edge。
-- 本地显示器连接后，会在 tty1 打开本地 Edge。
+- 应用中心打开 FnDesk，会进入控制台。
+- 本地 Edge 不会自动启动。
+- 点击控制台中的 **启动** 后，本地显示器 tty1 才会打开 Edge。
 
-默认 Web 服务端口：
+默认控制台端口：
 
 ```text
 18733
 ```
 
-本地显示器画面卡死或需要恢复时，可以通过 SSH 或维护终端执行：
+也可以通过 SSH 或维护终端控制本地 Edge：
 
 ```bash
+fndesk-start
+fndesk-stop
 fndesk-restart
 ```
 
-这个命令会重启本地显示器上的 FnDesk Edge 服务，并切回 tty1。它只影响本地显示器会话，不用于重启 Web Edge。
+这些别名分别对应：
 
-## Web 端控制与按需启停
-
-打开 Web Edge 后，画面右下角有一个 `☰ 控制` 菜单：
-
-- **启动 / 重启 / 关闭本地 Edge**：操作本地显示器上的 `web-kiosk.service`（重启会自动切回 tty1）。
-- **关闭 Web 后台**：立即回收远端 Xvnc 和 Edge 并断开连接。
-
-Web 会话采用按需启停，避免“打开后一直占用后台”：
-
-- 监听端口的 websockify 常驻，资源占用很小。
-- 真正耗资源的 Xvnc 和 Edge 在有客户端连接时按需启动。
-- 关闭应用窗口、切到其他标签页，或连续无人访问超过空闲超时后，自动回收 Xvnc 和 Edge；再次打开会自动恢复。
-
-空闲回收时长由 `/etc/default/web-kiosk` 中的环境变量控制：
-
-```text
-FNDESK_IDLE_TIMEOUT=180
+```bash
+sudo systemctl start fndesk-local.service && sudo chvt 1
+sudo systemctl stop fndesk-local.service
+sudo systemctl restart fndesk-local.service && sudo chvt 1
 ```
 
-单位为秒，默认 180。设为 `0` 可关闭自动回收（只靠控制按钮或关闭窗口来回收）。
+## 控制台功能
+
+控制台提供这些常用操作：
+
+- **启动**：启动本地显示器上的 Edge，并切换到 tty1。
+- **关闭**：停止本地 Edge 服务。
+- **重启**：重启本地 Edge 服务，并切换到 tty1。
+- **切到 tty1**：只切换本地显示器，不改变 Edge 运行状态。
+- **重置失败**：执行 `systemctl reset-failed fndesk-local.service`。
+- **日志查看**：查看 `fndesk-local.service` 和控制台自身日志。
+
+本地 Edge 的 systemd 服务名：
+
+```text
+fndesk-local.service
+```
+
+显示器电源策略服务名：
+
+```text
+fndesk-display-power.service
+```
 
 ## 从源码构建
 
@@ -94,14 +103,16 @@ kiosk/
 ## 关键文件
 
 - `manifest`：fnOS 应用包元数据。
-- `cmd/main`：Web Edge 服务入口。`start`/`stop`/`status`/`restart` 供 fnOS 调用，`web-up`/`web-down` 用于按需启停 Xvnc+Edge 会话（websockify 保持常驻）。
-- `cmd/common`：安装、升级、卸载回调逻辑。
-- `app/install-kiosk.sh`：FPK 安装时调用的系统依赖和本地显示器配置脚本。
-- `app/server/fndesk-ws.py`：websockify 包装。提供图片剪贴板（`/clipboard/image`）、按需唤醒/空闲回收 Web 会话，以及控制 API（`/api/web/*`、`/api/local/*`、`/api/status`）。
-- `app/server/fndesk-server.py`：依赖缺失或启动失败时的兜底状态页与控制接口。
-- `app/novnc/fndesk.html`：noVNC 前端。负责精确适配窗口尺寸、中文输入法与剪贴板，以及右下角控制按钮。
-- `app/window-sync.sh`：同步 Web Edge 窗口尺寸，使其铺满当前虚拟屏。
+- `cmd/main`：FnDesk 控制台服务入口。`start`/`stop`/`status`/`restart` 供 fnOS 调用。
+- `cmd/common`：安装、升级、卸载回调逻辑。升级/卸载时会清理旧 Web Edge 虚拟会话残留。
+- `app/install-kiosk.sh`：FPK 安装时调用的系统依赖、本地 Edge 服务和控制台配置脚本。
+- `app/server/fndesk-server.py`：控制台 HTTP 服务和本地 Edge 控制 API。
+- `app/www/index.html`：Web 控制台前端。
 - `wizard/uninstall`：fnOS 应用中心卸载向导配置。
+
+## 卸载说明
+
+FnDesk 卸载不会删除本地 Edge 用户数据。选择卸载依赖包时，只会卸载 FnDesk 安装时记录的依赖，并显式跳过 Mesa、libgl、libdrm、firmware、linux 等显卡驱动和系统基础包。
 
 ## 开发说明
 

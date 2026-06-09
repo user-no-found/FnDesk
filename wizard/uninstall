@@ -4,23 +4,7 @@
     "items": [
       {
         "type": "tips",
-        "helpText": "请选择卸载时是否保留 Web Edge 的用户数据，以及是否移除 FnDesk 依赖包。"
-      },
-      {
-        "type": "radio",
-        "field": "wizard_delete_data",
-        "label": "用户数据",
-        "initValue": "false",
-        "options": [
-          {
-            "label": "保留 Web Edge 登录状态、缓存和浏览器配置",
-            "value": "false"
-          },
-          {
-            "label": "删除 Web Edge 用户数据",
-            "value": "true"
-          }
-        ]
+        "helpText": "卸载 FnDesk 不会删除本地 Edge 用户数据。可选择是否移除 FnDesk 安装时记录的依赖包。"
       },
       {
         "type": "radio",
@@ -33,7 +17,7 @@
             "value": "false"
           },
           {
-            "label": "卸载 FnDesk 依赖包和孤立依赖",
+            "label": "卸载 FnDesk 记录的依赖包",
             "value": "true"
           }
         ]
