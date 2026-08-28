@@ -3,6 +3,11 @@
 RM="/bin/rm -rf"
 MKDIR="/bin/mkdir -p"
 
+systemctl_bounded()
+{
+    timeout --signal=KILL 5s systemctl "$@" 2>/dev/null || true
+}
+
 install_log()
 {
     local _msg_="$@"
@@ -131,8 +136,10 @@ stop_virtual_runtime()
 
 stop_local_runtime()
 {
-    systemctl stop fndesk-local.service 2>/dev/null || true
-    systemctl stop web-kiosk.service 2>/dev/null || true
+    # Never let an upgrade/uninstall callback wait for a compositor stuck in
+    # DRM teardown.  The stop jobs continue in systemd after this returns.
+    systemctl_bounded --no-block stop fndesk-local.service
+    systemctl_bounded --no-block stop web-kiosk.service
     rm -rf /run/fndesk-local /run/web-kiosk 2>/dev/null || true
 }
 
@@ -140,10 +147,14 @@ stop_all_runtime()
 {
     stop_control_runtime
     stop_local_runtime
-    systemctl disable --now fndesk-local.service 2>/dev/null || true
-    systemctl disable --now fndesk-display-power.service 2>/dev/null || true
-    systemctl disable --now web-kiosk.service 2>/dev/null || true
-    systemctl disable --now web-kiosk-display-power.service 2>/dev/null || true
+    systemctl_bounded --no-block stop fndesk-display-power.service
+    systemctl_bounded --no-block stop web-kiosk-display-power.service
+    systemctl_bounded disable fndesk-local.service
+    systemctl_bounded disable fndesk-display-power.service
+    systemctl_bounded disable web-kiosk.service
+    systemctl_bounded disable web-kiosk-display-power.service
+    systemctl_bounded --no-block stop seatd.service
+    systemctl_bounded disable seatd.service
     stop_virtual_runtime
 }
 
@@ -172,7 +183,7 @@ is_removable_package()
     fi
 
     case "$1" in
-        cage|microsoft-edge-stable|seatd|wlr-randr|xwayland|fonts-noto-cjk|adwaita-icon-theme|\
+        cage|microsoft-edge-stable|seatd|wayland-utils|wlr-randr|xwayland|fonts-noto-cjk|adwaita-icon-theme|\
         fcitx5|fcitx5-chinese-addons|fcitx5-frontend-gtk3|fcitx5-frontend-gtk4|fcitx5-frontend-qt5|\
         tigervnc-common|tigervnc-standalone-server|tigervnc-tools|novnc|websockify|x11-utils|xdotool|xclip)
             return 0
@@ -259,6 +270,7 @@ clean_system_files()
     rm -f /usr/local/bin/fndesk-local-launch 2>/dev/null || true
     rm -f /usr/local/bin/fndesk-local-browser 2>/dev/null || true
     rm -f /usr/local/bin/fndesk-display-power 2>/dev/null || true
+    rm -f /usr/local/bin/fndesk-seatd-socket-guard 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-launch 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-browser 2>/dev/null || true
     rm -f /usr/local/bin/web-kiosk-display-power 2>/dev/null || true
@@ -275,11 +287,20 @@ clean_system_files()
     rm -f /etc/udev/rules.d/99-web-kiosk-drm.rules 2>/dev/null || true
     rm -rf /run/fndesk-local /run/web-kiosk 2>/dev/null || true
 
-    systemctl daemon-reload 2>/dev/null || true
+    systemctl_bounded daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
-    systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
-    systemctl restart systemd-logind.service 2>/dev/null || true
-    systemctl enable --now getty@tty1.service 2>/dev/null || true
+    systemctl_bounded unmask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+    # Do not restart logind from a package callback: that can interrupt the
+    # current desktop/login session. Removed policy is applied at the next
+    # normal logind start.
+    systemctl_bounded enable getty@tty1.service
+    systemctl_bounded --no-block start getty@tty1.service
+    # FnDesk disables the global restart-always seatd while installed so its
+    # private instance can own /run/seatd.sock. Restore only its boot enablement
+    # after a full uninstall; do not start it inside this callback.
+    if package_installed seatd; then
+        systemctl_bounded enable seatd.service
+    fi
 }
 
 clean_app_dirs()

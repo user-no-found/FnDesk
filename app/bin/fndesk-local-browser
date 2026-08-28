@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source /etc/default/fndesk
+
+record_status_and_stop_cage() {
+  local status="$1"
+  if [[ -n "${FNDESK_CHILD_STATUS_FILE:-}" ]]; then
+    printf '%s\n' "${status}" >"${FNDESK_CHILD_STATUS_FILE}" || true
+  fi
+  # This script is Cage's direct child. Cage 0.1.4 may otherwise keep running
+  # with a zombie application when there are no outputs or Edge exits early.
+  kill -TERM "${PPID}" 2>/dev/null || true
+}
+
+has_wayland_output() {
+  local registry
+
+  if ! command -v wayland-info >/dev/null 2>&1; then
+    echo "FnDesk local display: wayland-info is not installed." >&2
+    return 1
+  fi
+  if ! registry="$(timeout --signal=KILL 3s wayland-info 2>&1)"; then
+    echo "FnDesk local display: Wayland output query failed: ${registry}" >&2
+    return 1
+  fi
+  grep -q "^interface: 'wl_output'" <<<"${registry}"
+}
+
+if ! has_wayland_output; then
+  echo "FnDesk local display: no active Wayland output; no monitor is connected or modeset failed." >&2
+  record_status_and_stop_cage 75
+  exit 75
+fi
+
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS=@im=fcitx
+export INPUT_METHOD=fcitx
+export SDL_IM_MODULE=fcitx
+export LANG=zh_CN.UTF-8
+export LANGUAGE=zh_CN:zh
+export LC_ALL=zh_CN.UTF-8
+
+if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+  dbus-update-activation-environment --systemd \
+    DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR \
+    GTK_IM_MODULE QT_IM_MODULE XMODIFIERS INPUT_METHOD SDL_IM_MODULE \
+    LANG LANGUAGE LC_ALL || true
+fi
+
+fcitx5 --enable xim,xcb -d || true
+sleep 1
+fcitx5-remote -o >/dev/null 2>&1 || true
+
+edge_args=(
+  --start-maximized
+  --ozone-platform=x11
+  --lang=zh-CN
+  --no-first-run
+  --no-default-browser-check
+  --password-store=basic
+  --disable-background-timer-throttling
+  --disable-renderer-backgrounding
+  --disable-backgrounding-occluded-windows
+  --disable-session-crashed-bubble
+  --disable-infobars
+  --enable-features=OverlayScrollbar
+)
+
+if [[ "${FNDESK_SOFTWARE_RENDERER:-1}" == "1" ]]; then
+  edge_args+=(--disable-gpu)
+fi
+
+set +e
+microsoft-edge-stable "${edge_args[@]}"
+edge_status=$?
+set -e
+
+record_status_and_stop_cage "${edge_status}"
+exit "${edge_status}"

@@ -18,9 +18,18 @@ if [[ -z "${KIOSK_USER:-}" ]]; then
 fi
 
 KIOSK_OUTPUT="${KIOSK_OUTPUT:-}"
+FNDESK_DRM_DEVICE="${FNDESK_DRM_DEVICE:-}"
+FNDESK_DRM_LEGACY="${FNDESK_DRM_LEGACY:-1}"
+FNDESK_DRM_NO_MODIFIERS="${FNDESK_DRM_NO_MODIFIERS:-1}"
+FNDESK_USE_SYSTEM_LIBDRM="${FNDESK_USE_SYSTEM_LIBDRM:-1}"
+FNDESK_SOFTWARE_RENDERER="${FNDESK_SOFTWARE_RENDERER:-1}"
 FNDESK_INSTALLED_PACKAGES=()
 FNDESK_CREATED_EDGE_KEY=0
 FNDESK_CREATED_EDGE_REPO=0
+
+systemctl_bounded() {
+  timeout --signal=KILL 5s systemctl "$@"
+}
 
 BOOTSTRAP_PACKAGES=(
   ca-certificates
@@ -32,7 +41,7 @@ BOOTSTRAP_PACKAGES=(
 LOCAL_PACKAGES=(
   cage
   seatd
-  wlr-randr
+  wayland-utils
   xwayland
   fonts-noto-cjk
   adwaita-icon-theme
@@ -207,24 +216,31 @@ sed -i '/^alias fndesk-stop=/d' "${KIOSK_HOME}/.bashrc" 2>/dev/null || true
 cat >>"${KIOSK_HOME}/.bashrc" <<'EOF'
 
 # FnDesk local display controls
-alias fndesk-start='sudo systemctl start fndesk-local.service && sudo chvt 1'
-alias fndesk-stop='sudo systemctl stop fndesk-local.service'
-alias fndesk-restart='sudo systemctl restart fndesk-local.service && sudo chvt 1'
+alias fndesk-start='sudo systemctl --no-block start fndesk-local.service'
+alias fndesk-stop='sudo systemctl --no-block stop fndesk-local.service'
+alias fndesk-restart='sudo systemctl --no-block restart fndesk-local.service'
 EOF
 chown "${KIOSK_USER}:${KIOSK_GROUP}" "${KIOSK_HOME}/.bashrc"
 
-echo "[6/8] Enabling seatd and reserving tty1"
-systemctl enable --now seatd.service
-systemctl disable --now getty@tty1.service 2>/dev/null || true
+echo "[6/8] Reserving tty1; FnDesk will use a private seatd instance"
+systemctl_bounded disable getty@tty1.service 2>/dev/null || true
+systemctl_bounded --no-block stop getty@tty1.service 2>/dev/null || true
 for tty in tty2 tty3 tty4 tty5 tty6; do
-  systemctl enable --now "getty@${tty}.service" >/dev/null 2>&1 || true
+  systemctl_bounded enable "getty@${tty}.service" >/dev/null 2>&1 || true
+  systemctl_bounded --no-block start "getty@${tty}.service" >/dev/null 2>&1 || true
 done
 
 echo "[7/8] Writing FnDesk local display configuration"
 install -d -m 0755 /etc/fndesk
 cat >/etc/default/fndesk <<EOF
 KIOSK_USER=${KIOSK_USER}
+KIOSK_GROUP=${KIOSK_GROUP}
 KIOSK_OUTPUT=${KIOSK_OUTPUT}
+FNDESK_DRM_DEVICE=${FNDESK_DRM_DEVICE}
+FNDESK_DRM_LEGACY=${FNDESK_DRM_LEGACY}
+FNDESK_DRM_NO_MODIFIERS=${FNDESK_DRM_NO_MODIFIERS}
+FNDESK_USE_SYSTEM_LIBDRM=${FNDESK_USE_SYSTEM_LIBDRM}
+FNDESK_SOFTWARE_RENDERER=${FNDESK_SOFTWARE_RENDERER}
 FNDESK_INSTALLED_PACKAGES='${FNDESK_INSTALLED_PACKAGES[*]}'
 FNDESK_CREATED_EDGE_KEY=${FNDESK_CREATED_EDGE_KEY}
 FNDESK_CREATED_EDGE_REPO=${FNDESK_CREATED_EDGE_REPO}
@@ -241,126 +257,10 @@ EOF
 chmod 0644 /etc/opt/edge/policies/managed/fndesk.json
 rm -f /etc/opt/edge/policies/managed/web-kiosk.json 2>/dev/null || true
 
-cat >/usr/local/bin/fndesk-local-launch <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-source /etc/default/fndesk
-
-export XDG_RUNTIME_DIR="/run/fndesk-local"
-export LIBSEAT_BACKEND=seatd
-export WLR_LIBINPUT_NO_DEVICES=1
-export WLR_NO_HARDWARE_CURSORS=1
-export GTK_IM_MODULE=fcitx
-export QT_IM_MODULE=fcitx
-export XMODIFIERS=@im=fcitx
-export INPUT_METHOD=fcitx
-export SDL_IM_MODULE=fcitx
-export LANG=zh_CN.UTF-8
-export LANGUAGE=zh_CN:zh
-export LC_ALL=zh_CN.UTF-8
-export XCURSOR_THEME=Adwaita
-export XCURSOR_SIZE=24
-
-mkdir -p "${XDG_RUNTIME_DIR}"
-chmod 700 "${XDG_RUNTIME_DIR}"
-
-if [[ -n "${KIOSK_OUTPUT:-}" ]] && command -v wlr-randr >/dev/null 2>&1; then
-  wlr-randr --output "${KIOSK_OUTPUT}" --on || true
-fi
-
-has_connected_display() {
-  local connector
-
-  if [[ -n "${KIOSK_OUTPUT:-}" ]]; then
-    connector="/sys/class/drm/${KIOSK_OUTPUT}/status"
-    if [[ -f "${connector}" ]] && grep -qx connected "${connector}"; then
-      return 0
-    fi
-    connector="/sys/class/drm/card0-${KIOSK_OUTPUT}/status"
-    if [[ -f "${connector}" ]] && grep -qx connected "${connector}"; then
-      return 0
-    fi
-    return 1
-  fi
-
-  for connector in /sys/class/drm/*/status; do
-    [[ -f "${connector}" ]] || continue
-    if grep -qx connected "${connector}"; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-if ! has_connected_display; then
-  echo "FnDesk local display: no connected DRM display; local display service is idle." >&2
-  exit 75
-fi
-
-exec dbus-run-session -- cage -s -- /usr/local/bin/fndesk-local-browser
-EOF
-chmod 0755 /usr/local/bin/fndesk-local-launch
-
-cat >/usr/local/bin/fndesk-local-browser <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-source /etc/default/fndesk
-
-export GTK_IM_MODULE=fcitx
-export QT_IM_MODULE=fcitx
-export XMODIFIERS=@im=fcitx
-export INPUT_METHOD=fcitx
-export SDL_IM_MODULE=fcitx
-export LANG=zh_CN.UTF-8
-export LANGUAGE=zh_CN:zh
-export LC_ALL=zh_CN.UTF-8
-
-if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-  dbus-update-activation-environment --systemd \
-    DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR \
-    GTK_IM_MODULE QT_IM_MODULE XMODIFIERS INPUT_METHOD SDL_IM_MODULE \
-    LANG LANGUAGE LC_ALL || true
-fi
-
-fcitx5 --enable xim,xcb -d || true
-sleep 1
-fcitx5-remote -o >/dev/null 2>&1 || true
-
-edge_args=(
-  --start-maximized
-  --ozone-platform=x11
-  --lang=zh-CN
-  --no-first-run
-  --no-default-browser-check
-  --password-store=basic
-  --disable-background-timer-throttling
-  --disable-renderer-backgrounding
-  --disable-backgrounding-occluded-windows
-  --disable-session-crashed-bubble
-  --disable-infobars
-  --enable-features=OverlayScrollbar
-)
-
-exec microsoft-edge-stable "${edge_args[@]}"
-EOF
-chmod 0755 /usr/local/bin/fndesk-local-browser
-
-cat >/usr/local/bin/fndesk-display-power <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ -w /sys/module/kernel/parameters/consoleblank ]]; then
-  printf '0' >/sys/module/kernel/parameters/consoleblank || true
-fi
-
-if command -v setterm >/dev/null 2>&1 && [[ -w /dev/tty1 ]]; then
-  setterm --blank 0 --powerdown 0 --powersave off </dev/tty1 >/dev/tty1 2>/dev/null || true
-fi
-EOF
-chmod 0755 /usr/local/bin/fndesk-display-power
+install -m 0755 "${SCRIPT_DIR}/bin/fndesk-local-launch" /usr/local/bin/fndesk-local-launch
+install -m 0755 "${SCRIPT_DIR}/bin/fndesk-local-browser" /usr/local/bin/fndesk-local-browser
+install -m 0755 "${SCRIPT_DIR}/bin/fndesk-display-power" /usr/local/bin/fndesk-display-power
+install -m 0755 "${SCRIPT_DIR}/bin/fndesk-seatd-socket-guard" /usr/local/bin/fndesk-seatd-socket-guard
 
 install -d -m 0755 /etc/systemd/logind.conf.d /etc/systemd/sleep.conf.d
 cat >/etc/systemd/logind.conf.d/fndesk.conf <<'EOF'
@@ -381,52 +281,14 @@ AllowHybridSleep=no
 EOF
 
 echo "[8/8] Writing systemd units"
-cat >/etc/systemd/system/fndesk-local.service <<EOF
-[Unit]
-Description=FnDesk Local Microsoft Edge
-After=systemd-user-sessions.service network-online.target seatd.service
-Wants=network-online.target seatd.service
-Conflicts=getty@tty1.service
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/default/fndesk
-User=root
-ExecStartPre=/usr/bin/install -d -o ${KIOSK_USER} -g $(id -gn ${KIOSK_USER}) -m 0700 /run/fndesk-local
-ExecStartPre=-/usr/bin/chvt 1
-ExecStart=/usr/sbin/runuser -u ${KIOSK_USER} -- /usr/local/bin/fndesk-local-launch
-ExecStopPost=/usr/bin/rm -rf /run/fndesk-local
-Restart=on-failure
-RestartPreventExitStatus=75
-RestartSec=2
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-StandardInput=tty
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat >/etc/systemd/system/fndesk-display-power.service <<'EOF'
-[Unit]
-Description=FnDesk Display Power Policy
-Before=fndesk-local.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fndesk-display-power
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
+install -m 0644 "${SCRIPT_DIR}/systemd/fndesk-local.service" /etc/systemd/system/fndesk-local.service
+install -m 0644 "${SCRIPT_DIR}/systemd/fndesk-display-power.service" /etc/systemd/system/fndesk-display-power.service
 
 # Remove old Web Edge/noVNC service names and hotplug auto-start behavior.
-systemctl disable --now web-kiosk.service 2>/dev/null || true
-systemctl disable --now web-kiosk-display-power.service 2>/dev/null || true
+systemctl_bounded --no-block stop web-kiosk.service 2>/dev/null || true
+systemctl_bounded --no-block stop web-kiosk-display-power.service 2>/dev/null || true
+systemctl_bounded disable web-kiosk.service 2>/dev/null || true
+systemctl_bounded disable web-kiosk-display-power.service 2>/dev/null || true
 rm -f /etc/systemd/system/web-kiosk.service 2>/dev/null || true
 rm -f /etc/systemd/system/web-kiosk-display-power.service 2>/dev/null || true
 rm -f /usr/local/bin/web-kiosk-launch 2>/dev/null || true
@@ -439,16 +301,23 @@ rm -f /etc/systemd/sleep.conf.d/web-kiosk.conf 2>/dev/null || true
 rm -f /etc/udev/rules.d/99-web-kiosk-drm.rules 2>/dev/null || true
 udevadm control --reload-rules 2>/dev/null || true
 
-systemctl daemon-reload
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
-systemctl restart systemd-logind.service 2>/dev/null || true
-systemctl enable --now fndesk-display-power.service
-systemctl disable fndesk-local.service 2>/dev/null || true
-systemctl stop fndesk-local.service 2>/dev/null || true
+# seatd-launch needs exclusive ownership of /run/seatd.sock. It creates a
+# per-session seatd whose target runs as KIOSK_USER; the global restart-always
+# daemon must therefore remain disabled while FnDesk is installed.
+systemctl_bounded disable seatd.service 2>/dev/null || true
+systemctl_bounded --no-block stop seatd.service 2>/dev/null || true
+
+systemctl_bounded daemon-reload
+systemctl_bounded mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
+systemctl_bounded enable fndesk-display-power.service
+systemctl_bounded --no-block start fndesk-display-power.service
+systemctl_bounded disable fndesk-local.service 2>/dev/null || true
+systemctl_bounded --no-block stop fndesk-local.service 2>/dev/null || true
 
 echo
 echo "Install completed."
 echo "FnDesk control console manages the local-display Edge."
 echo "Local Edge does not start automatically. Start it from the Web console or run: systemctl start fndesk-local.service"
 echo "Chinese input uses fcitx5 pinyin. Toggle with Ctrl+Space if needed."
+echo "The new logind power policy takes effect after logind is next restarted; the installer does not interrupt active sessions."
 echo "Check local logs with: journalctl -u fndesk-local.service -b"

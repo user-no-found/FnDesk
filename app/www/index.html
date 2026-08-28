@@ -173,7 +173,6 @@
             <button class="primary" id="start" type="button">启动</button>
             <button id="stop" type="button">关闭</button>
             <button id="restart" type="button">重启</button>
-            <button id="tty1" type="button">切到 tty1</button>
           </div>
           <div class="status-grid">
             <div class="field">
@@ -192,10 +191,10 @@
         <div class="section-head">
           <h2>诊断</h2>
           <div class="diagnostic-actions">
-            <button class="ghost" id="logs-local" type="button">本地服务日志</button>
+            <button class="ghost" id="logs-local" type="button">中文摘要</button>
+            <button class="ghost" id="logs-local-raw" type="button">原始日志</button>
             <button class="ghost" id="logs-control" type="button">控制台日志</button>
             <button class="ghost" id="reset-failed" type="button">重置失败</button>
-            <button class="danger" id="kill-edge" type="button">强制结束本地服务</button>
           </div>
         </div>
         <div class="section-body log-body">
@@ -216,9 +215,7 @@
       start: document.getElementById('start'),
       stop: document.getElementById('stop'),
       restart: document.getElementById('restart'),
-      tty1: document.getElementById('tty1'),
       resetFailed: document.getElementById('reset-failed'),
-      killEdge: document.getElementById('kill-edge'),
     };
 
     let logMode = 'local';
@@ -256,10 +253,20 @@
     }
 
     async function api(path, options) {
-      const res = await fetch(path, Object.assign({ cache: 'no-store' }, options || {}));
-      const type = res.headers.get('content-type') || '';
-      if (type.includes('application/json')) return res.json();
-      return res.text();
+      const requestOptions = Object.assign({ cache: 'no-store' }, options || {});
+      const timeoutMs = requestOptions.timeoutMs || 6500;
+      delete requestOptions.timeoutMs;
+      const controller = new AbortController();
+      requestOptions.signal = controller.signal;
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(path, requestOptions);
+        const type = res.headers.get('content-type') || '';
+        if (type.includes('application/json')) return res.json();
+        return res.text();
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     async function post(path) {
@@ -284,7 +291,6 @@
       els.start.disabled = active;
       els.stop.disabled = !active && failed !== 'failed';
       els.restart.disabled = false;
-      els.tty1.disabled = false;
       els.resetFailed.disabled = failed !== 'failed';
     }
 
@@ -303,7 +309,8 @@
       logMode = mode;
       try {
         const unit = mode === 'control' ? 'control' : 'local';
-        els.logs.textContent = await api(`/api/logs?unit=${unit}&lines=180`);
+        const format = mode === 'raw' ? '&format=raw' : '';
+        els.logs.textContent = await api(`/api/logs?unit=${unit}&lines=180${format}`);
         if (!els.logs.textContent.trim()) els.logs.textContent = '暂无日志';
       } catch (err) {
         els.logs.textContent = String(err);
@@ -317,17 +324,14 @@
     els.start.addEventListener('click', () => post('/api/local/start'));
     els.stop.addEventListener('click', () => post('/api/local/stop'));
     els.restart.addEventListener('click', () => post('/api/local/restart'));
-    els.tty1.addEventListener('click', () => post('/api/local/tty1'));
     els.resetFailed.addEventListener('click', () => post('/api/local/reset-failed'));
-    els.killEdge.addEventListener('click', () => {
-      if (window.confirm('强制结束 FnDesk 本地服务中的进程？')) post('/api/local/kill-edge');
-    });
     document.getElementById('logs-local').addEventListener('click', () => loadLogs('local'));
+    document.getElementById('logs-local-raw').addEventListener('click', () => loadLogs('raw'));
     document.getElementById('logs-control').addEventListener('click', () => loadLogs('control'));
 
     refresh();
     loadLogs('local');
-    setInterval(refresh, 8000);
+    setInterval(refresh, 10000);
   </script>
 </body>
 </html>

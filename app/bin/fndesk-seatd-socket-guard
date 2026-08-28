@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Remove only an unbound stale seatd socket before a FnDesk launch."""
+
+import errno
+import os
+import socket
+import stat
+import sys
+
+
+SOCKET_PATH = "/run/seatd.sock"
+
+
+def main():
+    try:
+        metadata = os.lstat(SOCKET_PATH)
+    except FileNotFoundError:
+        return 0
+
+    if not stat.S_ISSOCK(metadata.st_mode):
+        print(
+            f"FnDesk：{SOCKET_PATH} 存在但不是 socket，为安全起见拒绝启动。",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.5)
+    try:
+        client.connect(SOCKET_PATH)
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        if exc.errno != errno.ECONNREFUSED:
+            print(
+                f"FnDesk：无法确认 {SOCKET_PATH} 是否仍在使用：{exc}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        print(
+            f"FnDesk：{SOCKET_PATH} 仍有服务监听，为安全起见拒绝删除。",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        client.close()
+
+    try:
+        os.unlink(SOCKET_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"FnDesk：清理旧 seatd socket 失败：{exc}", file=sys.stderr)
+        return 1
+    else:
+        print("FnDesk：已清理上一次运行残留的 seatd socket。", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

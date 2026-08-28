@@ -1,0 +1,11 @@
+[Unit]
+Description=FnDesk Display Power Policy
+Before=fndesk-local.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fndesk-display-power
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

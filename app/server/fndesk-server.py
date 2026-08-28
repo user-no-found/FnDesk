@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import json
 import os
+import signal
 import subprocess
+import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,38 +19,124 @@ LEGACY_CONFIG_FILE = Path("/etc/default/web-kiosk")
 LOG_FILE = PKG_VAR / "fndesk.log"
 LOCAL_SERVICE = "fndesk-local.service"
 DISPLAY_POWER_SERVICE = "fndesk-display-power.service"
-LEGACY_LOCAL_SERVICE = "web-kiosk.service"
-LEGACY_DISPLAY_POWER_SERVICE = "web-kiosk-display-power.service"
+
+COMMAND_TIMEOUT = 3
+COMMAND_REAP_TIMEOUT = 0.25
+STATUS_CACHE_SECONDS = 2
+
+MONTH_NUMBERS = {
+    "Jan": "01",
+    "Feb": "02",
+    "Mar": "03",
+    "Apr": "04",
+    "May": "05",
+    "Jun": "06",
+    "Jul": "07",
+    "Aug": "08",
+    "Sep": "09",
+    "Oct": "10",
+    "Nov": "11",
+    "Dec": "12",
+}
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 16
 
 
-def run(command, timeout=30):
+def _text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def run(command, timeout=COMMAND_TIMEOUT):
+    """Run a helper without letting a stuck child pin an HTTP thread.
+
+    subprocess.run() kills and then waits without another bound after a
+    TimeoutExpired exception.  That wait can be permanent if the helper has
+    entered uninterruptible kernel sleep, so both termination and reaping are
+    bounded here.
+    """
+
+    command = [str(part) for part in command]
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        output = exc.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        return subprocess.CompletedProcess(command, 124, output + "\nCommand timed out.")
     except Exception as exc:
         return subprocess.CompletedProcess(command, 1, str(exc))
 
+    try:
+        output, _ = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(command, process.returncode, output or "")
+    except subprocess.TimeoutExpired as exc:
+        output = _text(exc.output)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
 
-def service_value(*args):
-    result = run(["systemctl", *args], timeout=10)
+        try:
+            final_output, _ = process.communicate(timeout=COMMAND_REAP_TIMEOUT)
+            if final_output:
+                output = final_output
+        except subprocess.TimeoutExpired:
+            # A D-state process cannot be reaped until its kernel operation
+            # returns.  Leave it signalled instead of waiting on this request.
+            if process.stdout is not None:
+                process.stdout.close()
+
+        suffix = "Command timed out; its process group was terminated."
+        return subprocess.CompletedProcess(command, 124, f"{output}\n{suffix}".lstrip())
+
+
+def parse_properties(output):
+    properties = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key:
+            properties[key] = value
+    return properties
+
+
+def service_snapshot(unit):
+    result = run(
+        [
+            "systemctl",
+            "show",
+            unit,
+            "--no-pager",
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=UnitFileState",
+            "--property=Result",
+        ]
+    )
+    properties = parse_properties(result.stdout)
+    active = properties.get("ActiveState", "unknown")
     return {
-        "ok": result.returncode == 0,
+        "name": unit,
+        "active": active,
+        "enabled": properties.get("UnitFileState", "unknown"),
+        "failed": "failed" if active == "failed" else "inactive",
+        "sub": properties.get("SubState", "unknown"),
+        "result": properties.get("Result", "unknown"),
+        "load": properties.get("LoadState", "unknown"),
         "code": result.returncode,
-        "value": result.stdout.strip(),
     }
 
 
@@ -72,103 +160,189 @@ def read_config():
     return data
 
 
-def command_exists(name):
-    return run(["/usr/bin/env", "sh", "-c", f"command -v {name} >/dev/null 2>&1"], timeout=5).returncode == 0
+def journal_timestamp(line):
+    parts = line.split(maxsplit=3)
+    if len(parts) < 3:
+        return ""
+    month = MONTH_NUMBERS.get(parts[0], parts[0])
+    return f"{month}-{parts[1].zfill(2)} {parts[2]}"
 
 
-def display_status():
-    displays = []
-    for path in sorted(Path("/sys/class/drm").glob("*/status")):
-        name = path.parent.name
-        try:
-            status = path.read_text(errors="ignore").strip()
-        except OSError:
-            status = "unknown"
-        displays.append({"name": name, "status": status})
-    connected = [item for item in displays if item["status"] == "connected"]
-    config = read_config()
-    selected = config.get("KIOSK_OUTPUT", "")
-    selected_status = ""
-    if selected:
-        candidates = {selected, f"card0-{selected}"}
-        for item in displays:
-            if item["name"] in candidates or item["name"].endswith(f"-{selected}"):
-                selected_status = item["status"]
-                break
-        if not selected_status:
-            selected_status = "missing"
+def localize_journal_line(line):
+    if "Starting fndesk-local.service" in line:
+        return "收到启动请求。"
+    if "Started fndesk-local.service" in line:
+        return "systemd 已启动 FnDesk 本地显示进程。"
+    if "Stopping fndesk-local.service" in line:
+        return "收到停止请求。"
+    if "Stopped fndesk-local.service" in line:
+        return "本地显示服务已停止。"
+    if "Deactivated successfully" in line:
+        return "本地显示服务已安全退出。"
+    if "Created VT-bound seat" in line:
+        return "已创建绑定 tty 的私有 seat。"
+    if "seatd started" in line:
+        return "私有 seatd 已启动。"
+    if "New client connected" in line:
+        return "Cage 已连接私有 seatd。"
+    if "Client disconnected" in line:
+        return "Cage 已断开私有 seatd。"
+    if "FnDesk：" in line:
+        return line.split("FnDesk：", 1)[1].strip()
+    if "FnDesk local display: using DRM device " in line:
+        device = line.split("FnDesk local display: using DRM device ", 1)[1].rstrip(".")
+        return f"使用 DRM 设备：{device}。"
+    if "no active Wayland output" in line:
+        return "未检测到可用显示输出：未连接显示器或显示模式设置失败，正在安全退出。"
+    if "Socket file found at socket path /run/seatd.sock" in line:
+        return "检测到上一次运行残留的 seatd socket，本次启动被拒绝。"
+    if "seatd exited prematurely" in line:
+        return "私有 seatd 提前退出。"
+    if "Main process exited" in line:
+        detail = line.rsplit(":", 1)[-1].strip()
+        return f"主进程退出：{detail}。"
+    if "Failed with result" in line:
+        return "服务启动失败，systemd 已记录失败状态。"
+    if "amdgpu: unknown" in line:
+        return "当前 Mesa 无法识别 AMD GPU，已进入兼容/软件渲染路径。"
+    if "EGL_NOT_INITIALIZED" in line or "Failed to initialize EGL" in line:
+        return "EGL 硬件渲染初始化失败。"
+    if "Failed to initialize glamor" in line:
+        return "Xwayland 硬件加速不可用，已回退到软件渲染。"
+    if '"/root"' in line and ("权限不够" in line or "Permission denied" in line):
+        return "旧版本错误地使用了 /root；当前版本已修复用户 HOME。"
+    if "msedge_crashpad_handler: --database is required" in line:
+        return "旧版本 Edge Crashpad 因 HOME 配置错误而启动失败。"
+    if "wl_display_terminate: Assertion" in line:
+        return "Cage 0.1.4 退出时触发上游断言；本次进程已退出，未形成 D 状态。"
+    return None
+
+
+def chinese_journal_summary(text):
+    events = []
+    last_event = None
+    for line in text.splitlines():
+        event = localize_journal_line(line)
+        if event is None:
+            continue
+        timestamp = journal_timestamp(line)
+        rendered = f"{timestamp}  {event}" if timestamp else event
+        if rendered == last_event:
+            continue
+        events.append(rendered)
+        last_event = rendered
+
+    header = [
+        "FnDesk 本地显示日志（中文摘要）",
+        "仅显示关键事件；如需完整诊断信息，请点击“原始日志”。",
+        "",
+    ]
+    if not events:
+        return "\n".join(header + ["暂无可识别的关键事件。", ""])
+    return "\n".join(header + events + [""])
+
+
+def _unknown_service(unit):
     return {
-        "selected": selected,
-        "selectedStatus": selected_status,
-        "connected": len(connected),
-        "items": displays,
+        "name": unit,
+        "active": "unknown",
+        "enabled": "unknown",
+        "failed": "unknown",
+        "sub": "unknown",
+        "result": "unknown",
+        "load": "unknown",
+        "code": 124,
     }
 
 
-def package_status(name):
-    result = run(["dpkg-query", "-W", "-f=${db:Status-Abbrev}", name], timeout=10)
-    return result.returncode == 0 and result.stdout.strip().startswith("ii")
-
-
-def pidgrep(pattern):
-    result = run(["pgrep", "-af", pattern], timeout=10)
-    if result.returncode != 0:
-        return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
-
-
-def status_payload():
+def build_status_payload():
     config = read_config()
-    local_active = service_value("is-active", LOCAL_SERVICE)
-    local_enabled = service_value("is-enabled", LOCAL_SERVICE)
-    local_failed = service_value("is-failed", LOCAL_SERVICE)
-    power_active = service_value("is-active", DISPLAY_POWER_SERVICE)
-    legacy_active = service_value("is-active", LEGACY_LOCAL_SERVICE)
-    legacy_power_active = service_value("is-active", LEGACY_DISPLAY_POWER_SERVICE)
-    show = run(["fgconsole"], timeout=5)
     return {
         "time": int(time.time()),
+        "stale": False,
         "services": {
-            "local": {
-                "name": LOCAL_SERVICE,
-                "active": local_active["value"],
-                "enabled": local_enabled["value"],
-                "failed": local_failed["value"],
-                "code": local_active["code"],
-            },
-            "displayPower": {
-                "name": DISPLAY_POWER_SERVICE,
-                "active": power_active["value"],
-                "code": power_active["code"],
-            },
-            "legacyLocal": {
-                "name": LEGACY_LOCAL_SERVICE,
-                "active": legacy_active["value"],
-                "code": legacy_active["code"],
-            },
-            "legacyDisplayPower": {
-                "name": LEGACY_DISPLAY_POWER_SERVICE,
-                "active": legacy_power_active["value"],
-                "code": legacy_power_active["code"],
-            },
+            "local": service_snapshot(LOCAL_SERVICE),
+            # Kept for response compatibility.  The UI intentionally performs
+            # only one bounded systemd query per refresh.
+            "displayPower": _unknown_service(DISPLAY_POWER_SERVICE),
         },
-        "display": display_status(),
-        "tty": show.stdout.strip() if show.returncode == 0 else "",
+        # Never probe DRM connector files or the current VT from the Web
+        # control plane: those reads can themselves enter D state after a KMS
+        # hang.  The compositor reports display failures in its journal.
+        "display": {
+            "selected": config.get("KIOSK_OUTPUT", ""),
+            "device": config.get("FNDESK_DRM_DEVICE", ""),
+            "liveProbe": False,
+            "items": [],
+        },
+        "tty": "",
         "config": {
             "kioskUser": config.get("KIOSK_USER", ""),
             "kioskOutput": config.get("KIOSK_OUTPUT", ""),
-        },
-        "packages": {
-            "edge": package_status("microsoft-edge-stable"),
-            "cage": package_status("cage"),
-            "seatd": package_status("seatd"),
-            "fcitx5": package_status("fcitx5"),
-        },
-        "processes": {
-            "edge": pidgrep("microsoft-edge-stable"),
-            "cage": pidgrep("cage .*fndesk|fndesk-local-launch"),
+            "drmDevice": config.get("FNDESK_DRM_DEVICE", ""),
         },
     }
+
+
+_STATUS_LOCK = threading.Lock()
+_STATUS_CACHE = {"payload": None, "expires": 0.0}
+
+
+def invalidate_status_cache():
+    _STATUS_CACHE["expires"] = 0.0
+
+
+def _cached_payload(stale):
+    payload = _STATUS_CACHE["payload"]
+    if payload is None:
+        return {
+            "time": int(time.time()),
+            "stale": True,
+            "services": {"local": _unknown_service(LOCAL_SERVICE)},
+            "display": {"liveProbe": False, "items": []},
+            "tty": "",
+            "config": {},
+        }
+    payload = dict(payload)
+    payload["stale"] = stale
+    return payload
+
+
+def status_payload():
+    now = time.monotonic()
+    if _STATUS_CACHE["payload"] is not None and now < _STATUS_CACHE["expires"]:
+        return _cached_payload(False)
+
+    if not _STATUS_LOCK.acquire(blocking=False):
+        return _cached_payload(True)
+
+    try:
+        payload = build_status_payload()
+        _STATUS_CACHE["payload"] = payload
+        _STATUS_CACHE["expires"] = time.monotonic() + STATUS_CACHE_SECONDS
+        return payload
+    finally:
+        _STATUS_LOCK.release()
+
+
+LOCAL_ACTIONS = {
+    "/api/local/start": (
+        ["systemctl", "--no-block", "start", LOCAL_SERVICE],
+        "启动本地 Edge",
+    ),
+    "/api/local/stop": (
+        ["systemctl", "--no-block", "stop", LOCAL_SERVICE],
+        "关闭本地 Edge",
+    ),
+    "/api/local/restart": (
+        ["systemctl", "--no-block", "restart", LOCAL_SERVICE],
+        "重启本地 Edge",
+    ),
+    "/api/local/reset-failed": (
+        ["systemctl", "reset-failed", LOCAL_SERVICE],
+        "重置失败状态",
+    ),
+}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -194,8 +368,22 @@ class Handler(SimpleHTTPRequestHandler):
             if unit == "control":
                 text = tail_file(LOG_FILE, line_count)
             else:
-                result = run(["journalctl", "-u", LOCAL_SERVICE, "-b", "-n", str(line_count), "--no-pager"], timeout=15)
-                text = result.stdout
+                result = run(
+                    [
+                        "journalctl",
+                        "-u",
+                        LOCAL_SERVICE,
+                        "-b",
+                        "-n",
+                        str(line_count),
+                        "--no-pager",
+                    ],
+                    timeout=5,
+                )
+                if query.get("format", ["summary"])[0] == "raw":
+                    text = result.stdout
+                else:
+                    text = chinese_journal_summary(result.stdout)
             self.send_text(text)
             return
         if path in ("/", "/app/fndesk/", "/fndesk.html", "/vnc_lite.html"):
@@ -204,52 +392,48 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path == "/api/local/start":
-            self.command_json(["systemctl", "start", LOCAL_SERVICE], "启动本地 Edge")
+        action = LOCAL_ACTIONS.get(path)
+        if action is None:
+            self.send_error(404)
             return
-        if path == "/api/local/stop":
-            self.command_json(["systemctl", "stop", LOCAL_SERVICE], "关闭本地 Edge")
-            return
-        if path == "/api/local/restart":
-            self.command_json(["systemctl", "restart", LOCAL_SERVICE], "重启本地 Edge")
-            return
-        if path == "/api/local/tty1":
-            self.command_json(["chvt", "1"], "切换到 tty1")
-            return
-        if path == "/api/local/reset-failed":
-            self.command_json(["systemctl", "reset-failed", LOCAL_SERVICE], "重置失败状态")
-            return
-        if path == "/api/local/kill-edge":
-            result = run(["systemctl", "kill", "--kill-who=all", "--signal=TERM", LOCAL_SERVICE], timeout=10)
-            self.send_json(command_payload(result, "强制结束 FnDesk 本地服务进程"))
-            return
-        self.send_error(404)
+        command, label = action
+        self.command_json(command, label)
 
     def command_json(self, command, label):
         result = run(command)
+        invalidate_status_cache()
         self.send_json(command_payload(result, label))
 
     def send_json(self, data):
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def send_text(self, text):
         raw = text.encode("utf-8", errors="replace")
         self.send_response(200)
         self.send_header("content-type", "text/plain; charset=utf-8")
+        self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def command_payload(result, label):
+    accepted = result.returncode == 0
     return {
-        "ok": result.returncode == 0,
-        "message": f"{label}{'成功' if result.returncode == 0 else '失败'}",
+        "ok": accepted,
+        "message": f"{label}{'请求已提交' if accepted else '失败'}",
         "code": result.returncode,
         "output": result.stdout,
     }

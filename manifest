@@ -1,5 +1,5 @@
 appname      = fndesk
-version               = 0.0.4
+version               = 0.0.5
 display_name          = FnDesk
 desc                  = 通过 Web 控制台启动、关闭、重启本地显示器上的 Microsoft Edge；不再提供 Web 端虚拟 Edge。<br>仓库地址：https://github.com/user-no-found/FnDesk
 platform              = x86
